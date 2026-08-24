@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use ab_profiles::{group, effective_rules, PROFILES};
+use ab_profiles::{effective_rules, group, PROFILES};
 use ab_runtime::run_session;
 use clap::{Parser, Subcommand};
 
@@ -71,6 +71,17 @@ enum Command {
         /// generated maven/gradle configs (only when you have none of your own).
         #[arg(long)]
         java_proxy_config: bool,
+        /// Mount host toolchain caches READ-WRITE (default: read-only).
+        /// WARNING: lets a compromised sandbox poison host package-manager
+        /// caches, which later host builds may trust — keep off unless you
+        /// accept that risk.
+        #[arg(long)]
+        rw_toolchain_cache: bool,
+        /// Disable the post-DNS guard so allowlisted hostnames may resolve to
+        /// loopback/link-local/private addresses. Off by default; explicit IP
+        /// rules (`--allow 10.0.2.2:443`) always work without this.
+        #[arg(long)]
+        allow_private_dns: bool,
         /// Print the generated MXC config and exit.
         #[arg(long)]
         dry_run: bool,
@@ -126,6 +137,13 @@ enum Command {
         /// JSONL audit output path.
         #[arg(long)]
         audit: Option<PathBuf>,
+        /// Allow allowlisted hostnames to resolve into loopback/link-local/
+        /// private ranges (SSRF guard off). Explicit IP rules need no flag.
+        #[arg(long)]
+        allow_private_dns: bool,
+        /// Max concurrent connections; excess are closed immediately.
+        #[arg(long, default_value_t = ab_proxy::DEFAULT_MAX_CONNECTIONS)]
+        max_connections: usize,
     },
 }
 
@@ -147,11 +165,12 @@ async fn build_filter_for_match(
     let rule = |s: &str| -> anyhow::Result<ab_proxy::HostRule> {
         ab_proxy::HostRule::parse(s).map_err(|e| anyhow::anyhow!("{e}"))
     };
-    let mut allow: Vec<ab_proxy::HostRule> =
-        effective_rules(p).iter().map(|r| rule(r)).collect::<Result<_, _>>()?;
+    let mut allow: Vec<ab_proxy::HostRule> = effective_rules(p)
+        .iter()
+        .map(|r| rule(r))
+        .collect::<Result<_, _>>()?;
     for g in net_groups {
-        let rules = group(g)
-            .ok_or_else(|| anyhow::anyhow!("unknown group `{g}`"))?;
+        let rules = group(g).ok_or_else(|| anyhow::anyhow!("unknown group `{g}`"))?;
         for r in rules.iter() {
             allow.push(rule(r)?);
         }
@@ -182,6 +201,8 @@ async fn main() -> anyhow::Result<()> {
             allow_listen,
             no_toolchain_cache,
             java_proxy_config,
+            rw_toolchain_cache,
+            allow_private_dns,
             dry_run,
             keep_session,
             debug,
@@ -190,8 +211,9 @@ async fn main() -> anyhow::Result<()> {
             let profile_ref = resolve_profile(&profile)?;
             let opts = ab_runtime::RunOptions {
                 profile: profile_ref,
-                workspace: workspace
-                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+                workspace: workspace.unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                }),
                 passthrough,
                 env,
                 inherit_secrets: inherit_secret,
@@ -209,6 +231,8 @@ async fn main() -> anyhow::Result<()> {
                 allow_listen,
                 no_toolchain_cache,
                 java_proxy_config,
+                rw_toolchain_cache,
+                allow_private_dns,
                 keep_session,
                 dry_run,
                 debug,
@@ -249,12 +273,20 @@ async fn main() -> anyhow::Result<()> {
                         println!("    binary:      {b}");
                     }
                     for s in p.home_specs {
-                        println!("    home dir:    ~/{}{}", s.rel, if s.optional { " (optional)" } else { "" });
+                        println!(
+                            "    home dir:    ~/{}{}",
+                            s.rel,
+                            if s.optional { " (optional)" } else { "" }
+                        );
                     }
                     println!("    secrets:     {}", p.secrets_env.join(", "));
                     println!(
                         "    net groups:  {}",
-                        if p.default_groups.is_empty() { "-".into() } else { p.default_groups.join(", ") }
+                        if p.default_groups.is_empty() {
+                            "-".into()
+                        } else {
+                            p.default_groups.join(", ")
+                        }
                     );
                     for r in effective_rules(p) {
                         println!("    allow:       {r}");
@@ -274,14 +306,27 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Command::Match { profile, host, net_groups, allow } => {
+        Command::Match {
+            profile,
+            host,
+            net_groups,
+            allow,
+        } => {
             let filter = build_filter_for_match(&profile, &net_groups, &allow).await?;
             let decision = filter.decide(&host);
             println!("{}", decision.reason);
             std::process::exit(if decision.allowed { 0 } else { 1 });
         }
 
-        Command::Proxy { allow, deny, token, port, audit } => {
+        Command::Proxy {
+            allow,
+            deny,
+            token,
+            port,
+            audit,
+            allow_private_dns,
+            max_connections,
+        } => {
             let rule = |s: &str| -> anyhow::Result<ab_proxy::HostRule> {
                 ab_proxy::HostRule::parse(s).map_err(|e| anyhow::anyhow!("{e}"))
             };
@@ -296,6 +341,9 @@ async fn main() -> anyhow::Result<()> {
                 token,
                 filter,
                 audit_path: audit,
+                allow_private_dns,
+                max_connections,
+                ..Default::default()
             })
             .await?;
             eprintln!("agentbox-proxy listening on {}", bound.addr);

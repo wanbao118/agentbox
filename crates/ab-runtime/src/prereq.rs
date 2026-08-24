@@ -62,15 +62,30 @@ pub async fn run_doctor(profile: Option<&'static AgentProfile>) -> Vec<Check> {
             ok: true,
             detail: p.display().to_string(),
         }),
-        None => out.push(Check {
-            name: "mxc-binary".into(),
-            ok: false,
-            detail: format!(
-                "`{}` not found. Set AGENTBOX_MXC_BIN, install to ~/.agentbox/bin/, \
-                 or build the sibling checkout (cd mxc && ./build-mac.sh --rust-only / ./build.sh)",
-                super::mxc_binary_name()
-            ),
-        }),
+        None => {
+            // Actionable hint when a sibling checkout exists but is ignored
+            // by the default security gate.
+            let sibling_note = match super::sibling_mxc_hint() {
+                Some(p) => format!(
+                    "\n  note: a sibling mxc binary exists at {} but is NOT trusted \
+                     by default; set {}=1 to use it (or copy it to ~/.agentbox/bin/)",
+                    p.display(),
+                    super::SIBLING_DISCOVERY_ENV
+                ),
+                None => String::new(),
+            };
+            out.push(Check {
+                name: "mxc-binary".into(),
+                ok: false,
+                detail: format!(
+                    "`{}` not found. Set AGENTBOX_MXC_BIN, install to ~/.agentbox/bin/, \
+                     or build a checkout yourself and opt in with {}=1{}",
+                    super::mxc_binary_name(),
+                    super::SIBLING_DISCOVERY_ENV,
+                    sibling_note
+                ),
+            });
+        }
     }
 
     // Platform prerequisites.
@@ -95,8 +110,7 @@ pub async fn run_doctor(profile: Option<&'static AgentProfile>) -> Vec<Check> {
                     }),
             });
         }
-        let userns =
-            std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone").ok();
+        let userns = std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone").ok();
         let enabled = userns.map(|s| s.trim() != "0").unwrap_or(true);
         out.push(Check {
             name: "unprivileged-userns".into(),
@@ -115,7 +129,11 @@ pub async fn run_doctor(profile: Option<&'static AgentProfile>) -> Vec<Check> {
         out.push(match bound {
             Ok(b) => {
                 b.shutdown();
-                Check { name: "loopback-bind".into(), ok: true, detail: format!("ephemeral bind on {}", b.port) }
+                Check {
+                    name: "loopback-bind".into(),
+                    ok: true,
+                    detail: format!("ephemeral bind on {}", b.port),
+                }
             }
             Err(e) => Check {
                 name: "loopback-bind".into(),
@@ -151,15 +169,17 @@ pub async fn run_doctor(profile: Option<&'static AgentProfile>) -> Vec<Check> {
                 } else if spec.optional {
                     "absent (optional)".into()
                 } else {
-                    "missing — run the agent once on the host first, or expect a fresh login"
-                        .into()
+                    "missing — run the agent once on the host first, or expect a fresh login".into()
                 },
             });
         }
 
         let mut present = Vec::new();
         for key in profile.secrets_env {
-            if std::env::var_os(key).map(|v| !v.is_empty()).unwrap_or(false) {
+            if std::env::var_os(key)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+            {
                 present.push(*key);
             }
         }

@@ -116,6 +116,88 @@ fi
 kill $PROXY_PID 2>/dev/null || true
 wait $PROXY_PID 2>/dev/null || true
 
+echo "[10] post-DNS guard: allowlisted hostname resolving into loopback is refused"
+# Port ranges stay disjoint from case [9] (20000-39999) and below the macOS
+# ephemeral range (>=49152).
+SECRET_PORT=$((43000 + RANDOM % 1500))
+GUARD_PROXY_PORT=$((45000 + RANDOM % 1500))
+mkdir -p "$TMPDIR_RUN/www"
+echo "HOST-LOCAL-SECRET-PROOF" > "$TMPDIR_RUN/www/secret.txt"
+python3 -m http.server "$SECRET_PORT" --bind 127.0.0.1 --directory "$TMPDIR_RUN/www" &>/dev/null &
+HTTPD_PID=$!
+for _ in $(seq 1 25); do
+  nc -z 127.0.0.1 "$SECRET_PORT" 2>/dev/null && break
+  sleep 0.2
+done
+"$AGENTBOX" proxy --allow localhost --port "$GUARD_PROXY_PORT" &>/dev/null &
+GUARD_PID=$!
+up=1
+for _ in $(seq 1 20); do
+  nc -z 127.0.0.1 "$GUARD_PROXY_PORT" 2>/dev/null && up=0 && break
+  sleep 0.2
+done
+if [ "$up" -ne 0 ]; then
+  check "guard-proxy started" 1
+else
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -x "http://127.0.0.1:$GUARD_PROXY_PORT" \
+    --max-time 5 "http://localhost:$SECRET_PORT/secret.txt" 2>/dev/null || echo ERR)
+  case "$code" in
+    502|ERR) check "localhost -> 127.0.0.1 refused by ssrf guard (got HTTP $code)" 0 ;;
+    *) check "localhost -> 127.0.0.1 refused by ssrf guard (got HTTP $code)" 1 ;;
+  esac
+fi
+
+echo "[11] explicit IP rule still reaches host loopback (deliberate opt-in)"
+IP_PROXY_PORT=$((47000 + RANDOM % 1500))
+"$AGENTBOX" proxy --allow 127.0.0.1 --port "$IP_PROXY_PORT" &>/dev/null &
+IPP_PID=$!
+up=1
+for _ in $(seq 1 20); do
+  nc -z 127.0.0.1 "$IP_PROXY_PORT" 2>/dev/null && up=0 && break
+  sleep 0.2
+done
+if [ "$up" -ne 0 ]; then
+  check "ip-rule proxy started" 1
+else
+  body=""
+  for _ in 1 2; do
+    body=$(curl -sS -x "http://127.0.0.1:$IP_PROXY_PORT" --max-time 5 \
+      "http://127.0.0.1:$SECRET_PORT/secret.txt" 2>/dev/null || echo ERR)
+    [[ "$body" == *HOST-LOCAL-SECRET-PROOF* ]] && break
+    sleep 1
+  done
+  case "$body" in
+    *HOST-LOCAL-SECRET-PROOF*) check "explicit 127.0.0.1 rule tunnels (escape hatch intact)" 0 ;;
+    *) check "explicit 127.0.0.1 rule tunnels (escape hatch intact)" 1 ;;
+  esac
+fi
+kill $HTTPD_PID $GUARD_PID $IPP_PID 2>/dev/null || true
+wait $HTTPD_PID $GUARD_PID $IPP_PID 2>/dev/null || true
+
+echo "[12] toolchain caches are mounted READ-ONLY (no cross-session poisoning)"
+POISON="$HOME/.cache/pip/agentbox-e2e-poison"
+rm -f "$POISON"
+"$AGENTBOX" run shell --workspace "$TMPDIR_RUN" -- \
+  -c 'touch ~/.cache/pip/agentbox-e2e-poison' >/dev/null 2>&1 || true
+if [ -e "$POISON" ]; then
+  rm -f "$POISON"
+  check "host pip cache unchanged after sandbox write attempt" 1
+else
+  check "host pip cache unchanged after sandbox write attempt" 0
+fi
+
+echo "[13] injected secrets never appear in any process argv"
+ANTHROPIC_API_KEY=SUPERSECRET-E2E-PROOF "$AGENTBOX" run shell --workspace "$TMPDIR_RUN" -- \
+  -c 'sleep 12' >/dev/null 2>&1 &
+RUN_PID=$!
+sleep 6
+if ps -ww -Ao args= 2>/dev/null | grep -q 'SUPERSECRET[-]E2E-PROOF'; then
+  check "secret absent from all argv (config rides a 0600 file)" 1
+else
+  check "secret absent from all argv (config rides a 0600 file)" 0
+fi
+wait $RUN_PID 2>/dev/null || true
+
 rm -rf "$TMPDIR_RUN"
 echo
 echo "== results: $PASS passed, $FAIL failed =="

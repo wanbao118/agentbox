@@ -6,7 +6,7 @@ mod prereq;
 mod session;
 
 pub use configgen::{build_config, Containment, ExecSpec, FsPolicy, NetworkPosture};
-pub use mxcbin::{find_mxc_binary, mxc_binary_name};
+pub use mxcbin::{find_mxc_binary, mxc_binary_name, sibling_mxc_hint, SIBLING_DISCOVERY_ENV};
 pub use prereq::{run_doctor, Check};
 pub use session::{run_session, AuditSummary, ConfigMode, RunOptions};
 
