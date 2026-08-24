@@ -71,7 +71,10 @@ pub struct SeatbeltOptions {
 
 impl Default for SeatbeltOptions {
     fn default() -> Self {
-        Self { nested_pty: true, keychain_access: false }
+        Self {
+            nested_pty: true,
+            keychain_access: false,
+        }
     }
 }
 
@@ -140,10 +143,16 @@ mod tests {
         let exec = ExecSpec {
             command_line: "exec 'claude' '--model' 'sonnet'".into(),
             cwd: PathBuf::from("/Users/dev/proj"),
-            env: vec![("HOME".into(), "/tmp/scratch/home".into()), ("PATH".into(), "/usr/bin:/bin".into())],
+            env: vec![
+                ("HOME".into(), "/tmp/scratch/home".into()),
+                ("PATH".into(), "/usr/bin:/bin".into()),
+            ],
         };
         let fs = FsPolicy {
-            readwrite: vec![PathBuf::from("/Users/dev/proj"), PathBuf::from("/tmp/scratch/home")],
+            readwrite: vec![
+                PathBuf::from("/Users/dev/proj"),
+                PathBuf::from("/tmp/scratch/home"),
+            ],
             readonly: vec![PathBuf::from("/usr/local")],
             denied: vec![],
         };
@@ -157,13 +166,25 @@ mod tests {
     #[test]
     fn seatbelt_config_shape() {
         let (exec, fs, net) = sample();
-        let v = build_config(Containment::Seatbelt, &exec, &fs, &net, &SeatbeltOptions::default());
+        let v = build_config(
+            Containment::Seatbelt,
+            &exec,
+            &fs,
+            &net,
+            &SeatbeltOptions::default(),
+        );
         assert_eq!(v["version"], "0.8.0-alpha");
         assert_eq!(v["containment"], "seatbelt");
-        assert_eq!(v["process"]["commandLine"], "exec 'claude' '--model' 'sonnet'");
+        assert_eq!(
+            v["process"]["commandLine"],
+            "exec 'claude' '--model' 'sonnet'"
+        );
         assert_eq!(v["network"]["egress"]["default"], "deny");
         assert_eq!(v["network"]["ingress"]["hostLoopback"], "deny");
-        assert_eq!(v["runtimeConfig"]["networkProxy"], "http://agentbox:t0k@127.0.0.1:55555");
+        assert_eq!(
+            v["runtimeConfig"]["networkProxy"],
+            "http://agentbox:t0k@127.0.0.1:55555"
+        );
         assert_eq!(v["seatbelt"]["nestedPty"], true);
         assert_eq!(v["filesystem"]["readwritePaths"][0], "/Users/dev/proj");
         // Env serialized as KEY=VALUE strings.
@@ -174,8 +195,13 @@ mod tests {
     #[test]
     fn bubblewrap_config_has_no_seatbelt_key() {
         let (exec, fs, net) = sample();
-        let v =
-            build_config(Containment::Bubblewrap, &exec, &fs, &net, &SeatbeltOptions::default());
+        let v = build_config(
+            Containment::Bubblewrap,
+            &exec,
+            &fs,
+            &net,
+            &SeatbeltOptions::default(),
+        );
         assert!(v.get("seatbelt").is_none());
         assert_eq!(v["containment"], "bubblewrap");
     }
@@ -187,7 +213,10 @@ mod tests {
             Containment::Seatbelt,
             &exec,
             &fs,
-            &NetworkPosture { proxy_url: None, ingress_allow: true },
+            &NetworkPosture {
+                proxy_url: None,
+                ingress_allow: true,
+            },
             &SeatbeltOptions::default(),
         );
         assert_eq!(v["network"]["ingress"]["default"], "allow");

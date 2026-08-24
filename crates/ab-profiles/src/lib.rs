@@ -53,8 +53,12 @@ pub const GROUP_GIT: &[&str] = &[
     "*.gitlab.com",
 ];
 
-pub const GROUP_AI_PROVIDER_ANTHROPIC: &[&str] =
-    &["anthropic.com", "*.anthropic.com", "claude.ai", "*.claude.ai"];
+pub const GROUP_AI_PROVIDER_ANTHROPIC: &[&str] = &[
+    "anthropic.com",
+    "*.anthropic.com",
+    "claude.ai",
+    "*.claude.ai",
+];
 
 pub const GROUP_AI_PROVIDER_OPENAI: &[&str] =
     &["openai.com", "*.openai.com", "chatgpt.com", "*.chatgpt.com"];
@@ -67,8 +71,7 @@ pub const GROUP_AI_PROVIDER_GOOGLE: &[&str] = &[
     "*.gstatic.com",
 ];
 
-pub const GROUP_AI_PROVIDER_OPENROUTER: &[&str] =
-    &["openrouter.ai", "*.openrouter.ai"];
+pub const GROUP_AI_PROVIDER_OPENROUTER: &[&str] = &["openrouter.ai", "*.openrouter.ai"];
 
 /// A complete agent profile.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -111,7 +114,10 @@ pub const CLAUDE_CODE: AgentProfile = AgentProfile {
     id: "claude-code",
     display: "Claude Code (Anthropic)",
     binaries: &["claude"],
-    home_specs: &[HomeSpec { rel: ".claude", optional: false }],
+    home_specs: &[HomeSpec {
+        rel: ".claude",
+        optional: false,
+    }],
     secrets_env: ANTHROPIC_ENV,
     net_allow: &[
         "api.anthropic.com",
@@ -129,7 +135,10 @@ pub const CODEX: AgentProfile = AgentProfile {
     id: "codex",
     display: "Codex CLI (OpenAI)",
     binaries: &["codex"],
-    home_specs: &[HomeSpec { rel: ".codex", optional: false }],
+    home_specs: &[HomeSpec {
+        rel: ".codex",
+        optional: false,
+    }],
     secrets_env: &[
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
@@ -156,7 +165,10 @@ pub const GEMINI: AgentProfile = AgentProfile {
     id: "gemini",
     display: "Gemini CLI (Google)",
     binaries: &["gemini"],
-    home_specs: &[HomeSpec { rel: ".gemini", optional: false }],
+    home_specs: &[HomeSpec {
+        rel: ".gemini",
+        optional: false,
+    }],
     secrets_env: &[
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
@@ -183,8 +195,14 @@ pub const AIDER: AgentProfile = AgentProfile {
     display: "Aider",
     binaries: &["aider"],
     home_specs: &[
-        HomeSpec { rel: ".aider", optional: true },
-        HomeSpec { rel: ".aider.conf.yml", optional: true },
+        HomeSpec {
+            rel: ".aider",
+            optional: true,
+        },
+        HomeSpec {
+            rel: ".aider.conf.yml",
+            optional: true,
+        },
     ],
     secrets_env: &[
         "OPENAI_API_KEY",
@@ -198,11 +216,7 @@ pub const AIDER: AgentProfile = AgentProfile {
         "AZURE_API_KEY",
         "AZURE_ENDPOINT",
     ],
-    net_allow: &[
-        "api.deepseek.com",
-        "deepseek.com",
-        "*.deepseek.com",
-    ],
+    net_allow: &["api.deepseek.com", "deepseek.com", "*.deepseek.com"],
     default_groups: &["packages-pip"],
     extra_rw: &[],
     notes: "Provider endpoints depend on the configured model; the union of common \
@@ -215,8 +229,14 @@ pub const OPENCODE: AgentProfile = AgentProfile {
     display: "OpenCode",
     binaries: &["opencode"],
     home_specs: &[
-        HomeSpec { rel: ".local/share/opencode", optional: false },
-        HomeSpec { rel: ".config/opencode", optional: true },
+        HomeSpec {
+            rel: ".local/share/opencode",
+            optional: false,
+        },
+        HomeSpec {
+            rel: ".config/opencode",
+            optional: true,
+        },
     ],
     secrets_env: &[
         "OPENAI_API_KEY",
@@ -265,8 +285,7 @@ pub const SHELL: AgentProfile = AgentProfile {
 };
 
 /// All built-in profiles, in presentation order.
-pub const PROFILES: &[AgentProfile] =
-    &[CLAUDE_CODE, CODEX, GEMINI, AIDER, OPENCODE, SHELL];
+pub const PROFILES: &[AgentProfile] = &[CLAUDE_CODE, CODEX, GEMINI, AIDER, OPENCODE, SHELL];
 
 /// Look up a profile by id.
 pub fn get(id: &str) -> Option<&'static AgentProfile> {
@@ -324,10 +343,18 @@ mod tests {
                 assert!(group(g).is_some(), "{p:?} unknown group {g}");
             }
             for s in p.secrets_env {
-                assert!(s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'));
+                assert!(s
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'));
             }
         }
-        for g in ["packages", "packages-pip", "packages-npm", "packages-cargo", "git"] {
+        for g in [
+            "packages",
+            "packages-pip",
+            "packages-npm",
+            "packages-cargo",
+            "git",
+        ] {
             assert!(group(g).is_some());
         }
         assert!(group("nope").is_none());

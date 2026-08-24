@@ -620,8 +620,11 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
     }
 
     // ---- Proxy -----------------------------------------------------------
-    let (bound, proxy_url, proxy_port): (Option<ab_proxy::BoundProxy>, Option<String>, Option<u16>) =
-        if opts.offline {
+    let (bound, proxy_url, proxy_port): (
+        Option<ab_proxy::BoundProxy>,
+        Option<String>,
+        Option<u16>,
+    ) = if opts.offline {
         eprintln!("agentbox: offline mode — no proxy, no network");
         (None, None, None)
     } else {

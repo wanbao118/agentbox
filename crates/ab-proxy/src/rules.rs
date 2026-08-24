@@ -99,10 +99,16 @@ pub struct Decision {
 
 impl Decision {
     fn allow(reason: impl Into<String>) -> Self {
-        Self { allowed: true, reason: reason.into() }
+        Self {
+            allowed: true,
+            reason: reason.into(),
+        }
     }
     fn deny(reason: impl Into<String>) -> Self {
-        Self { allowed: false, reason: reason.into() }
+        Self {
+            allowed: false,
+            reason: reason.into(),
+        }
     }
 }
 
@@ -120,7 +126,11 @@ pub struct HostFilter {
 
 impl HostFilter {
     pub fn new(allow: Vec<HostRule>, deny: Vec<HostRule>) -> Self {
-        Self { allow, deny, allow_ip_literals: false }
+        Self {
+            allow,
+            deny,
+            allow_ip_literals: false,
+        }
     }
 
     /// Decide for `authority` — either `host` or `host:port` (CONNECT form).
