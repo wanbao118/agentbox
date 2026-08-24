@@ -1,5 +1,7 @@
 # agentbox
 
+[![ci](https://github.com/wanbao118/agentbox/actions/workflows/ci.yml/badge.svg)](https://github.com/wanbao118/agentbox/actions/workflows/ci.yml)
+
 **基于 [Microsoft eXecution Containers (MXC)](https://github.com/microsoft/mxc) 的多 coding-agent 安全沙箱运行时。**
 
 agentbox 不重复造沙箱：MXC 负责内核级隔离（macOS Seatbelt / Linux Bubblewrap），agentbox 补齐它缺的最后一块——**生产级 enforcing 出站代理 + 多 agent 编排**，让"域名级网络白名单"真正成为强制策略而非君子协定。

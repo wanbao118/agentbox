@@ -45,10 +45,12 @@ jobs:
       - name: Build mxc native binary
         working-directory: mxc
         run: |
+          # `bash script` (not ./script): checkout does not preserve exec bits.
           if [ "$RUNNER_OS" = "macOS" ]; then
-            ./build-mac.sh --rust-only
+            bash build-mac.sh --rust-only
           else
-            ./build.sh --rust-only || cargo build --release -p lxc
+            # mxc's cargo workspace lives under src/.
+            bash build.sh --rust-only || cargo build --release -p lxc --manifest-path src/Cargo.toml
           fi
 
       - name: Unit & integration tests
