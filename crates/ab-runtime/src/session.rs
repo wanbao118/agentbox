@@ -322,6 +322,12 @@ async fn summarize_audit(path: &Path) -> Option<AuditSummary> {
 
 /// Execute one sandboxed agent session end-to-end.
 pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
+    if std::env::consts::OS == "windows" {
+        anyhow::bail!(
+            "agentbox does not support Windows yet: only macOS Seatbelt and Linux \
+             Bubblewrap backends are wired. See README roadmap."
+        );
+    }
     let workspace = opts.workspace.canonicalize().map_err(|e| {
         anyhow::anyhow!("workspace {}: {e}", opts.workspace.display())
     })?;

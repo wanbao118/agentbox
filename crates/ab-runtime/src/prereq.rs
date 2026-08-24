@@ -38,14 +38,20 @@ fn which(name: &str) -> Option<PathBuf> {
 pub async fn run_doctor(profile: Option<&'static AgentProfile>) -> Vec<Check> {
     let mut out = Vec::new();
 
-    // Host basics.
+    // Host basics. Windows has no wired backend yet — say so up front.
+    let windows = std::env::consts::OS == "windows";
     out.push(Check {
         name: "host".into(),
-        ok: true,
+        ok: !windows,
         detail: format!(
-            "{os} {arch}",
+            "{os} {arch}{suffix}",
             os = std::env::consts::OS,
-            arch = std::env::consts::ARCH
+            arch = std::env::consts::ARCH,
+            suffix = if windows {
+                " — not supported yet (macOS/Linux only in v1)"
+            } else {
+                ""
+            }
         ),
     });
 

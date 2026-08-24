@@ -68,10 +68,22 @@ Claude Code 接 OpenRouter 的要点（官方教程）：`ANTHROPIC_BASE_URL=htt
 免费模型注意事项：`:free` 档有上游限流与"思考链吞噬回复"现象（ECONNRESET、空 result），
 属模型侧问题——换模型即可；HTTP 层在沙箱内始终稳定。
 
+## 安装
+
+```bash
+git clone https://github.com/wanbao118/agentbox.git
+cd agentbox
+./scripts/install.sh     # 构建并安装 CLI 到 ~/.cargo/bin，mxc 二进制到 ~/.agentbox/bin
+```
+
+安装脚本会自动处理 MXC 原生二进制：优先复用已有的（`AGENTBOX_MXC_BIN` / 兄弟 mxc checkout /
+npm 全局 `@microsoft/mxc-sdk`），都没有时从源码构建一次。装完 `agentbox doctor`
+自检，然后即可在任意目录使用。
+
 ## 快速开始
 
 ```bash
-# 构建
+# 开发模式构建
 cargo build --release
 
 # 环境自检（mxc 二进制发现、平台依赖、profile 检查）
