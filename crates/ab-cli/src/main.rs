@@ -58,6 +58,15 @@ enum Command {
         /// macOS only: allow Keychain reachability inside the sandbox.
         #[arg(long)]
         keychain: bool,
+        /// Let the sandbox bind/listen (dev servers, test stubs). Egress
+        /// stays proxy-only; on Seatbelt this also admits host-loopback
+        /// inbound (platform limitation).
+        #[arg(long)]
+        allow_listen: bool,
+        /// Skip host toolchain caches (.m2, gradle, npm, pip, go, cargo) and
+        /// credential-file snapshots.
+        #[arg(long)]
+        no_toolchain_cache: bool,
         /// Print the generated MXC config and exit.
         #[arg(long)]
         dry_run: bool,
@@ -166,6 +175,8 @@ async fn main() -> anyhow::Result<()> {
             deny_path,
             rw_config,
             keychain,
+            allow_listen,
+            no_toolchain_cache,
             dry_run,
             keep_session,
             debug,
@@ -190,6 +201,8 @@ async fn main() -> anyhow::Result<()> {
                     ab_runtime::ConfigMode::Snapshot
                 },
                 keychain,
+                allow_listen,
+                no_toolchain_cache,
                 keep_session,
                 dry_run,
                 debug,

@@ -34,6 +34,12 @@ pub struct NetworkPosture {
     /// Loopback proxy URL (may carry credentials on seatbelt; must be bare
     /// on bubblewrap). `None` = fully offline.
     pub proxy_url: Option<String>,
+    /// Opt-in: allow the sandbox to bind/listen (framework dev servers,
+    /// integration-test stubs). Seatbelt cannot separate intra-sandbox
+    /// loopback from host loopback, so this necessarily admits inbound
+    /// host-loopback connections too — enforced choice, documented trade-off.
+    /// Egress stays proxy-only either way.
+    pub ingress_allow: bool,
 }
 
 /// Process execution parameters.
@@ -96,12 +102,15 @@ pub fn build_config(
             "readonlyPaths": paths(&fs.readonly),
             "deniedPaths": paths(&fs.denied),
         },
-        // Deny-by-default both ways. The proxy endpoint named under
-        // runtimeConfig.networkProxy remains reachable by design (model 2);
-        // every other host-loopback / LAN / WAN path stays closed.
+        // Egress: proxy-only (model 2), never loosened. Ingress: deny by
+        // default; `ingress_allow` opts in to bind/listen (Seatbelt mandates
+        // hostLoopback == default, so the pair moves together).
         "network": {
             "egress": { "default": "deny" },
-            "ingress": { "default": "deny", "hostLoopback": "deny" },
+            "ingress": {
+                "default": if network.ingress_allow { "allow" } else { "deny" },
+                "hostLoopback": if network.ingress_allow { "allow" } else { "deny" },
+            },
         },
     });
 
@@ -140,6 +149,7 @@ mod tests {
         };
         let net = NetworkPosture {
             proxy_url: Some("http://agentbox:t0k@127.0.0.1:55555".into()),
+            ingress_allow: false,
         };
         (exec, fs, net)
     }
@@ -168,6 +178,22 @@ mod tests {
             build_config(Containment::Bubblewrap, &exec, &fs, &net, &SeatbeltOptions::default());
         assert!(v.get("seatbelt").is_none());
         assert_eq!(v["containment"], "bubblewrap");
+    }
+
+    #[test]
+    fn ingress_allow_opens_bind_listen_pair() {
+        let (exec, fs, _) = sample();
+        let v = build_config(
+            Containment::Seatbelt,
+            &exec,
+            &fs,
+            &NetworkPosture { proxy_url: None, ingress_allow: true },
+            &SeatbeltOptions::default(),
+        );
+        assert_eq!(v["network"]["ingress"]["default"], "allow");
+        // Seatbelt requires hostLoopback == default.
+        assert_eq!(v["network"]["ingress"]["hostLoopback"], "allow");
+        assert_eq!(v["network"]["egress"]["default"], "deny");
     }
 
     #[test]

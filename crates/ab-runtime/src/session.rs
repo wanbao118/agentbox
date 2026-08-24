@@ -36,6 +36,11 @@ pub struct RunOptions {
     pub offline: bool,
     pub config_mode: ConfigMode,
     pub keychain: bool,
+    /// Opt-in: let the sandbox bind/listen (dev servers, test stubs).
+    pub allow_listen: bool,
+    /// Opt-out: skip mounting host toolchain caches / snapshotting their
+    /// credential files (Nexus tokens, npmrc, netrc, ...).
+    pub no_toolchain_cache: bool,
     pub keep_session: bool,
     pub dry_run: bool,
     pub debug: bool,
@@ -234,6 +239,69 @@ fn build_allowlist(opts: &RunOptions) -> anyhow::Result<ab_proxy::HostFilter> {
     Ok(ab_proxy::HostFilter { allow, deny, allow_ip_literals: false })
 }
 
+/// Small credential/config FILES snapshotted into the session HOME so package
+/// managers reach private registries (Nexus, Artifactory, GPR, ...). Only
+/// existing files are copied; they live in the ephemeral scratch and die with
+/// the session.
+const TOOLCHAIN_CONFIG_FILES: &[&str] = &[
+    ".npmrc",
+    ".netrc",
+    ".pypirc",
+    ".m2/settings.xml",
+    ".gradle/gradle.properties",
+    ".cargo/config.toml",
+    ".cargo/credentials.toml",
+    ".config/pip/pip.conf",
+    ".config/go/env",
+];
+
+/// Build-cache directories mounted READ-WRITE from the host so repeated
+/// builds reuse artifacts instead of re-downloading through the proxy.
+const TOOLCHAIN_CACHE_DIRS: &[&str] = &[
+    ".m2/repository",
+    ".gradle/caches",
+    ".npm",
+    ".cache/pip",
+    "go/pkg/mod",
+    ".cargo/registry",
+    ".cargo/git/db",
+];
+
+/// Apply toolchain config snapshots + cache mounts. Returns extra rw paths.
+fn apply_toolchain_mounts(
+    home: &Path,
+    scratch_home: &Path,
+) -> Vec<PathBuf> {
+    let mut rw = Vec::new();
+
+    for rel in TOOLCHAIN_CONFIG_FILES {
+        let src = home.join(rel);
+        if !src.is_file() {
+            continue;
+        }
+        let dest = scratch_home.join(rel);
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::copy(&src, &dest) {
+            Ok(_) => eprintln!("agentbox: config snapshotted ~/{rel}", rel = rel),
+            Err(e) => eprintln!("agentbox: warning: ~/{rel} not copied: {e}", rel = rel),
+        }
+    }
+
+    for rel in TOOLCHAIN_CACHE_DIRS {
+        let real = home.join(rel);
+        if let Some(parent) = real.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Mount whether or not it exists yet — first build populates it and
+        // subsequent sessions reuse the host cache.
+        std::fs::create_dir_all(&real).ok();
+        rw.push(real);
+    }
+    rw
+}
+
 fn build_env(
     opts: &RunOptions,
     scratch_home: &Path,
@@ -254,6 +322,17 @@ fn build_env(
     // tools that `mkdir $(tmpdir)/<name>` (Bun/opencode, pip, npm) land in a
     // writable path instead of getting EPERM on the host /tmp.
     env.insert("TMPDIR".into(), scratch_tmp.display().to_string());
+    // Align every JVM's temp dir with the sandbox-writable TMPDIR. This is
+    // what makes the JDK attach API work between two in-sandbox JVMs (attach
+    // protocol creates .attach_pid<pid> in the shared tmp) and keeps
+    // temp-heavy builds off the read-only host /tmp. Existing user flags are
+    // preserved by prepending ours (JVM merges JAVA_TOOL_OPTIONS last-wins
+    // per property).
+    let jto = match std::env::var("JAVA_TOOL_OPTIONS") {
+        Ok(v) if !v.is_empty() => format!("-Djava.io.tmpdir=\"{}\" {v}", scratch_tmp.display()),
+        _ => format!("-Djava.io.tmpdir=\"{}\"", scratch_tmp.display()),
+    };
+    env.insert("JAVA_TOOL_OPTIONS".into(), jto);
     for passthrough_key in ["TERM", "LANG", "LC_ALL", "TZ", "SHELL"] {
         if let Ok(v) = std::env::var(passthrough_key) {
             env.insert(passthrough_key.into(), v);
@@ -436,6 +515,9 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
             let mut v = vec![workspace.clone(), scratch_home.clone(), scratch_tmp.clone()];
             v.extend(extra_rw_paths(opts.profile));
             v.extend(rw_extra.iter().cloned());
+            if !opts.no_toolchain_cache {
+                v.extend(apply_toolchain_mounts(&home, &scratch_home));
+            }
             v
         },
         readonly,
@@ -452,7 +534,7 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
         containment,
         &exec,
         &fs,
-        &NetworkPosture { proxy_url: proxy_url.clone() },
+        &NetworkPosture { proxy_url: proxy_url.clone(), ingress_allow: opts.allow_listen },
         &seatbelt_opts,
     );
 
