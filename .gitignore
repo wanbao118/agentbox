@@ -1,0 +1,13 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Session / local artifacts
+*.jsonl
+.agentbox*
+.DS_Store
+
+# Local env / secrets
+.env
+.env.*

@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest      # seatbelt e2e runs here
+            run-e2e: true
+          - os: ubuntu-latest     # unit tests + doctor only (no VM nesting)
+            run-e2e: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sibling checkout so agentbox's discovery finds <repo>/mxc/...
+      - name: Check out microsoft/mxc
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/mxc
+          path: mxc
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build mxc native binary
+        working-directory: mxc
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            ./build-mac.sh --rust-only
+          else
+            ./build.sh --rust-only || cargo build --release -p lxc
+          fi
+
+      - name: Unit & integration tests
+        run: cargo test --workspace
+
+      - name: Doctor
+        run: ./target/release/agentbox doctor shell || true
+
+      - name: End-to-end (seatbelt)
+        if: matrix.run-e2e == true
+        run: |
+          cargo build --release
+          ./scripts/e2e-macos.sh

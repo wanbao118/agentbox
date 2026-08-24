@@ -1,0 +1,10 @@
+[package]
+name = "ab-profiles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Built-in coding-agent profiles (filesystem, secrets, network baselines) for agentbox"
+
+[dependencies]
+serde = { workspace = true }
+ab-proxy = { path = "../ab-proxy" }

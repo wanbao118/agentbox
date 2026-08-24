@@ -1,0 +1,20 @@
+[package]
+name = "agentbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Secure multi-agent sandbox runtime on top of Microsoft eXecution Containers (MXC)"
+
+[[bin]]
+name = "agentbox"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+ab-proxy = { path = "../ab-proxy" }
+ab-profiles = { path = "../ab-profiles" }
+ab-runtime = { path = "../ab-runtime" }
