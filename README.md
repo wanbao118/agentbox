@@ -104,6 +104,12 @@ cargo build --release
 
 # 任意命令的逃生舱
 ./target/release/agentbox run shell --allow api.github.com -- -c 'gh pr list'
+
+# CI 流水线：agent 触碰任何白名单外域名 → 会话以退出码 2 失败
+./target/release/agentbox run claude-code --strict --net-group packages -- -p 'fix the bug'
+
+# JVM 构建链（maven/gradle 走代理）
+./target/release/agentbox run shell --java-proxy-config -- mvn test
 ```
 
 ## e2e 验证结果（macOS 15.7 x86_64 实测，13 项）
@@ -227,7 +233,7 @@ scripts/e2e-macos.sh 可重复的端到端验证
 
 - [ ] v2: apple/container microVM 后端（强隔离档）
 - [ ] v2: Landlock ABI6/seccomp 加固 Linux 非 netns 路径
-- [ ] `--strict` 模式（有 deny 即非零退出码，供 CI 使用）与审计实时 tail
+- [x] `--strict` 模式：任一被拒出站 → 退出码 2，CI 流水线直接可用；审计实时 tail 仍开放
 - [ ] MCP server 白名单编排（本地 stdio MCP 自动放行、SSE 远端按域名放行）
 - [ ] 上游 PR：外部代理 host 列表转发接口（消除 Linux token 差异）
 - [ ] Linux 实机 e2e（bwrap+slirp4netns 路径目前仅配置级验证）

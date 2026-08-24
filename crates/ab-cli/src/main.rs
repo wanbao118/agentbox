@@ -71,6 +71,10 @@ enum Command {
         /// generated maven/gradle configs (only when you have none of your own).
         #[arg(long)]
         java_proxy_config: bool,
+        /// Fail with exit code 2 when any egress attempt was denied by policy
+        /// (for CI pipelines wrapping agent sessions).
+        #[arg(long)]
+        strict: bool,
         /// Mount host toolchain caches READ-WRITE (default: read-only).
         /// WARNING: lets a compromised sandbox poison host package-manager
         /// caches, which later host builds may trust — keep off unless you
@@ -201,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
             allow_listen,
             no_toolchain_cache,
             java_proxy_config,
+            strict,
             rw_toolchain_cache,
             allow_private_dns,
             dry_run,
@@ -239,6 +244,19 @@ async fn main() -> anyhow::Result<()> {
                 denied_paths: deny_path,
             };
             let outcome = run_session(opts).await?;
+            if strict && ab_runtime::is_strict_violation(&outcome.audit_summary) {
+                let denied = outcome
+                    .audit_summary
+                    .as_ref()
+                    .map(|s| s.denied)
+                    .unwrap_or(0);
+                eprintln!(
+                    "agentbox: --strict violated: {denied} denied egress attempt(s); \
+                     failing the session (exit {})",
+                    ab_runtime::STRICT_EXIT_CODE
+                );
+                std::process::exit(ab_runtime::STRICT_EXIT_CODE);
+            }
             std::process::exit(outcome.exit_code);
         }
 

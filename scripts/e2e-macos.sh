@@ -198,6 +198,20 @@ else
 fi
 wait $RUN_PID 2>/dev/null || true
 
+echo "[14] --strict fails the session when policy denies egress"
+# The session is SUPPOSED to fail (exit 2); guard it against set -e.
+set +e
+"$AGENTBOX" run shell --workspace "$TMPDIR_RUN" --strict \
+  -c 'curl -sS -o /dev/null --max-time 8 https://example.com/' >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" = "2" ]
+check "strict session exits 2 on deny (got $rc)" $?
+
+"$AGENTBOX" run shell --workspace "$TMPDIR_RUN" --offline -- -c 'true' >/dev/null 2>&1
+[ $? -eq 0 ]
+check "clean session unaffected by --strict (exit 0)" $?
+
 rm -rf "$TMPDIR_RUN"
 echo
 echo "== results: $PASS passed, $FAIL failed =="

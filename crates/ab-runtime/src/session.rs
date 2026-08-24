@@ -560,6 +560,16 @@ async fn summarize_audit(path: &Path) -> Option<AuditSummary> {
     })
 }
 
+/// True when `--strict` semantics are violated: at least one egress attempt
+/// was rejected by policy during the session.
+pub fn is_strict_violation(summary: &Option<AuditSummary>) -> bool {
+    summary.as_ref().map(|s| s.denied > 0).unwrap_or(false)
+}
+
+/// Exit code for a strict-mode session: 2 signals policy violation so CI can
+/// distinguish it from agent failure (child's own code).
+pub const STRICT_EXIT_CODE: i32 = 2;
+
 /// Execute one sandboxed agent session end-to-end.
 pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
     if std::env::consts::OS == "windows" {
@@ -842,6 +852,24 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_violation_detected_only_on_denies() {
+        let none: Option<AuditSummary> = None;
+        assert!(!is_strict_violation(&none));
+        assert!(!is_strict_violation(&Some(AuditSummary {
+            allowed: 5,
+            denied: 0,
+            errors: 0,
+            top_denied: vec![],
+        })));
+        assert!(is_strict_violation(&Some(AuditSummary {
+            allowed: 5,
+            denied: 1,
+            errors: 0,
+            top_denied: vec![("evil.io".into(), 1)],
+        })));
+    }
 
     #[test]
     fn jvm_props_include_both_schemes_and_nonproxy() {
