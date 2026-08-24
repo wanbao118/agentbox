@@ -15,7 +15,7 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -33,12 +33,12 @@ jobs:
             run-e2e: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Sibling checkout; trusted here because CI builds it itself (see the
       # AGENTBOX_ALLOW_SIBLING_MXC env at the top of this workflow).
       - name: Check out microsoft/mxc
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: microsoft/mxc
           path: mxc
