@@ -117,12 +117,18 @@ kill $PROXY_PID 2>/dev/null || true
 wait $PROXY_PID 2>/dev/null || true
 
 echo "[10] post-DNS guard: allowlisted hostname resolving into loopback is refused"
-SECRET_PORT=$((21100 + RANDOM % 3000))
-GUARD_PROXY_PORT=$((25100 + RANDOM % 3000))
+# Port ranges stay disjoint from case [9] (20000-39999) and below the macOS
+# ephemeral range (>=49152).
+SECRET_PORT=$((43000 + RANDOM % 1500))
+GUARD_PROXY_PORT=$((45000 + RANDOM % 1500))
 mkdir -p "$TMPDIR_RUN/www"
 echo "HOST-LOCAL-SECRET-PROOF" > "$TMPDIR_RUN/www/secret.txt"
 python3 -m http.server "$SECRET_PORT" --bind 127.0.0.1 --directory "$TMPDIR_RUN/www" &>/dev/null &
 HTTPD_PID=$!
+for _ in $(seq 1 25); do
+  nc -z 127.0.0.1 "$SECRET_PORT" 2>/dev/null && break
+  sleep 0.2
+done
 "$AGENTBOX" proxy --allow localhost --port "$GUARD_PROXY_PORT" &>/dev/null &
 GUARD_PID=$!
 up=1
@@ -142,7 +148,7 @@ else
 fi
 
 echo "[11] explicit IP rule still reaches host loopback (deliberate opt-in)"
-IP_PROXY_PORT=$((28100 + RANDOM % 3000))
+IP_PROXY_PORT=$((47000 + RANDOM % 1500))
 "$AGENTBOX" proxy --allow 127.0.0.1 --port "$IP_PROXY_PORT" &>/dev/null &
 IPP_PID=$!
 up=1
@@ -153,8 +159,13 @@ done
 if [ "$up" -ne 0 ]; then
   check "ip-rule proxy started" 1
 else
-  body=$(curl -sS -x "http://127.0.0.1:$IP_PROXY_PORT" --max-time 5 \
-    "http://127.0.0.1:$SECRET_PORT/secret.txt" 2>/dev/null || echo ERR)
+  body=""
+  for _ in 1 2; do
+    body=$(curl -sS -x "http://127.0.0.1:$IP_PROXY_PORT" --max-time 5 \
+      "http://127.0.0.1:$SECRET_PORT/secret.txt" 2>/dev/null || echo ERR)
+    [[ "$body" == *HOST-LOCAL-SECRET-PROOF* ]] && break
+    sleep 1
+  done
   case "$body" in
     *HOST-LOCAL-SECRET-PROOF*) check "explicit 127.0.0.1 rule tunnels (escape hatch intact)" 0 ;;
     *) check "explicit 127.0.0.1 rule tunnels (escape hatch intact)" 1 ;;
