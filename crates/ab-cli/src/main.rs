@@ -67,6 +67,10 @@ enum Command {
         /// credential-file snapshots.
         #[arg(long)]
         no_toolchain_cache: bool,
+        /// JVM build support: tokenless proxy + JAVA_TOOL_OPTIONS proxy props +
+        /// generated maven/gradle configs (only when you have none of your own).
+        #[arg(long)]
+        java_proxy_config: bool,
         /// Print the generated MXC config and exit.
         #[arg(long)]
         dry_run: bool,
@@ -177,6 +181,7 @@ async fn main() -> anyhow::Result<()> {
             keychain,
             allow_listen,
             no_toolchain_cache,
+            java_proxy_config,
             dry_run,
             keep_session,
             debug,
@@ -203,6 +208,7 @@ async fn main() -> anyhow::Result<()> {
                 keychain,
                 allow_listen,
                 no_toolchain_cache,
+                java_proxy_config,
                 keep_session,
                 dry_run,
                 debug,
