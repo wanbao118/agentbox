@@ -15,7 +15,7 @@ agentbox 不重复造沙箱：MXC 负责内核级隔离（macOS Seatbelt / Linux
 │   ┌─────────────────────────┐               ┌───────────────────────────┐  │
 │   │ 域名 allowlist 强制      │◄── CONNECT ───│  claude / codex / gemini  │  │
 │   │ IP 字面量默认拒绝         │   (唯一出口)   │  aider / opencode / shell │  │
-│   │ DNS 在代理侧解析         │               │                           │  │
+│   │ DNS 在代理侧解析+IP 校验   │               │                           │  │
 │   │ token 认证 (macOS)       │               │  文件系统: 仅 workspace 可写│  │
 │   │ JSONL 审计日志           │               │  HOME = 会话快照 scratch   │  │
 │   └─────────────────────────┘               │  凭证按白名单注入           │  │
@@ -31,7 +31,7 @@ agentbox 不重复造沙箱：MXC 负责内核级隔离（macOS Seatbelt / Linux
 | 层 | 谁 | 保证 |
 |---|---|---|
 | L3/L4 | MXC（seatbelt profile / bwrap netns+iptables） | 直连任何外部地址、其他本机服务、局域网 → **EPERM** |
-| L7 | agentbox enforcing proxy | 只有白名单内的**域名**能通过 CONNECT 隧道；IP 直连、DNS 重绑、未列域名 → **403** |
+| L7 | agentbox enforcing proxy | 只有白名单内的**域名**能通过 CONNECT 隧道；IP 直连、未列域名 → **403**；白名单域名解析到 loopback/链路本地/内网地址（DNS 重绑、SSRF）→ **502 拒绝** |
 
 不遵守 `HTTP_PROXY` 的客户端也逃不掉——它在第一层就已经没有出站路径了。
 
@@ -76,9 +76,15 @@ cd agentbox
 ./scripts/install.sh     # 构建并安装 CLI 到 ~/.cargo/bin，mxc 二进制到 ~/.agentbox/bin
 ```
 
-安装脚本会自动处理 MXC 原生二进制：优先复用已有的（`AGENTBOX_MXC_BIN` / 兄弟 mxc checkout /
+安装脚本会自动处理 MXC 原生二进制：优先复用已有的（`AGENTBOX_MXC_BIN` /
 npm 全局 `@microsoft/mxc-sdk`），都没有时从源码构建一次。装完 `agentbox doctor`
 自检，然后即可在任意目录使用。
+
+> 安全提示：运行时与安装脚本都**不会**自动信任从当前目录祖先搜到的兄弟
+> `mxc/` checkout——你 clone 的任意仓库都可能在那条"看起来合理"的路径放置可执行文件，
+> 而它正是以宿主身份运行的沙箱启动器。自己构建的 checkout 需显式开启：
+> `AGENTBOX_ALLOW_SIBLING_MXC=1 agentbox ...`。信任根只有三个：
+> `AGENTBOX_MXC_BIN`、`PATH`、`~/.agentbox/bin`。
 
 ## 快速开始
 
@@ -113,6 +119,9 @@ cargo build --release
 7. ✅ 直连 DNS/UDP :53 被内核拒绝
 8. ✅ SSH_AUTH_SOCK / AWS 密钥等宿主环境零泄漏
 9. ✅ 跨会话借用代理策略被 token 拒绝（407）
+10. ✅ 白名单域名解析进 loopback 被 post-DNS 守卫拒绝（502）；显式 IP 规则逃生舱不受影响
+11. ✅ 工具链缓存只读挂载：沙箱内写宿主 pip 缓存不落地（防跨会话投毒）
+12. ✅ 注入密钥不出现在任何进程 argv（配置经 0600 文件传递）
 
 CI：`.github/workflows/ci.yml` —— clippy(-D warnings) + macos/ubuntu 矩阵测试，
 macOS runner 额外构建 mxc 并跑完整 e2e。
@@ -163,6 +172,28 @@ agentbox proxy --allow '*.internal' --audit a.jsonl  # 独立调试代理
 **防什么**（对沙箱内进程）：数据外泄到任意域名/IP、绕过代理直连、访问宿主敏感
 文件与 SSH/GPG 凭证、污染宿主 agent 配置、探测局域网/本机其他服务。
 
+**纵深防御要点**（对应安全审计 issue #1–#5 的修复）：
+
+- **工具链缓存只读挂载**（默认）：`~/.m2/repository`、`~/.gradle/caches`、`~/.npm`、
+  `~/.cache/pip`、`go/pkg/mod`、`~/.cargo/registry|git/db` 以 READ-ONLY 进入沙箱——
+  被攻陷的 agent 无法把恶意构件写进宿主包管理器缓存（Maven/Gradle/pip 复用缓存时
+  默认不重新校验，写回即跨会话持久化后门）。需要写回性能时显式加
+  `--rw-toolchain-cache`（会打印高风险警告）。
+- **密钥不进 argv**：含全部注入密钥与会话代理 token 的 MXC 配置经
+  0700 会话目录内 0600 文件传递（`--config <path>`），不再 base64 后走命令行
+  （macOS `ps -ww` / Linux `/proc/<pid>/cmdline` 全用户可见）。argv 只暴露一个
+  不透明路径。
+- **兄弟 mxc checkout 不自动信任**：二进制发现仅信任 `AGENTBOX_MXC_BIN`、`PATH`、
+  `~/.agentbox/bin`；CWD 祖先里的 `mxc/` 需 `AGENTBOX_ALLOW_SIBLING_MXC=1`
+  显式启用（防止 clone 即 RCE）。
+- **post-DNS 目的地校验**：白名单域名解析到 loopback / 链路本地（含云元数据
+  169.254.169.254）/ RFC1918 / ULA / CGNAT / 多播等受保护地址 → 502 + 审计 deny，
+  堵住 DNS 重绑与 SSRF。逃生舱：显式 IP 规则（`--allow 10.0.2.2:443`）或
+  `--allow-private-dns`。
+- **代理资源上限**：并发连接信号量上限（默认 256，超出立即关闭）、单隧道总时长
+  上限（默认 30 分钟）、请求头整体读取预算、审计通道有界 backlog——被攻陷的
+  沙箱无法用慢速/海量连接耗尽宿主 FD 与内存。
+
 **不防什么**：
 - 白名单域名本身的返回内容（agent 拿到的合法 API 响应仍可能含提示注入内容）
 - 快照进沙箱的登录凭证在会话期间位于沙箱内（这是 agent 正常工作的前提）；
@@ -178,14 +209,16 @@ crates/ab-profiles   内置 agent profiles 与命名网络组
 crates/ab-runtime    MXC 配置生成(0.8 schema)、二进制发现、会话编排、doctor
 crates/ab-cli        agentbox CLI（run/doctor/profiles/allowlist/match/proxy）
 scripts/e2e-macos.sh 可重复的端到端验证
-../mxc/              microsoft/mxc 上游 checkout（构建产物被自动发现）
+../mxc/              microsoft/mxc 上游 checkout（需 AGENTBOX_ALLOW_SIBLING_MXC=1 才被信任）
 ```
 
 ## 生产化状态
 
 - [x] 权限加固：会话 scratch 目录 0700、审计日志 0600、extra_rw 目录 0700
+- [x] 安全审计修复（issue #1–#5）：工具链缓存只读挂载、密钥 0600 文件传递不进 argv、
+      兄弟 mxc 发现默认关闭、post-DNS IP 校验防重绑/SSRF、代理并发/隧道时长上限
 - [x] clippy `-D warnings` 全清；测试套件连续多轮稳定（无 flake）
-- [x] 对抗性 e2e：DNS/UDP 直连、env 泄漏、跨会话 token 隔离
+- [x] 对抗性 e2e：DNS/UDP 直连、env 泄漏、跨会话 token 隔离、缓存投毒、argv 密钥扫描
 - [x] schema 回归锁定（mxc validator 参与 CI）
 - [x] CI 矩阵（macOS seatbelt 全量 e2e / Ubuntu 单测+doctor）
 - [x] 真实 agent 冒烟：opencode 与 claude-code 经 OpenRouter 全链路跑通

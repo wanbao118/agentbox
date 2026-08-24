@@ -31,7 +31,6 @@ dependencies = [
  "ab-profiles",
  "ab-proxy",
  "anyhow",
- "base64",
  "clap",
  "serde",
  "serde_json",

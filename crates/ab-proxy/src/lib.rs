@@ -16,13 +16,24 @@
 //!   closes the "resolve once, connect by IP" bypass.
 //! - **Per-session bearer token** (Proxy-Authorization) stops other local
 //!   processes from borrowing this proxy's policy.
+//! - **Post-DNS destination check** (`netguard`): allowlisted hostnames that
+//!   resolve into loopback/link-local/RFC1918/ULA space are refused, closing
+//!   SSRF and DNS-rebinding paths at the L7 layer.
+//! - **Bounded resources**: concurrent connections are semaphore-capped and
+//!   every tunnel has a total-lifetime cap, so a compromised sandbox cannot
+//!   exhaust host FDs/memory through the proxy.
 //! - **JSONL audit log** of every allow/deny decision for fast allowlist
 //!   iteration.
 
 pub mod audit;
+pub mod netguard;
 pub mod rules;
 pub mod server;
 
 pub use audit::{Audit, AuditRecord};
+pub use netguard::is_protected_destination;
 pub use rules::{normalize_host, HostFilter, HostRule};
-pub use server::{generate_token, spawn, BoundProxy, ProxyConfig};
+pub use server::{
+    generate_token, spawn, BoundProxy, ProxyConfig, DEFAULT_MAX_CONNECTIONS,
+    DEFAULT_TUNNEL_MAX_DURATION,
+};

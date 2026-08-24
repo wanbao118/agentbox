@@ -14,10 +14,16 @@ pub struct AuditRecord {
     pub reason: String,
 }
 
+/// Maximum buffered audit lines before the writer catches up. Bounded so a
+/// flood of decisions (e.g. connection-limit errors from a runaway sandbox)
+/// cannot grow memory without limit; beyond the cap events are dropped rather
+/// than ever blocking the data path.
+const AUDIT_BACKLOG: usize = 8192;
+
 /// Cheap cloneable sink; `None` tx means disabled.
 #[derive(Clone, Default)]
 pub struct Audit {
-    tx: Option<mpsc::UnboundedSender<String>>,
+    tx: Option<mpsc::Sender<String>>,
 }
 
 impl Audit {
@@ -42,7 +48,7 @@ impl Audit {
         #[cfg(not(unix))]
         let file = std::fs::File::create(path)?;
         let std_writer = std::io::BufWriter::new(file);
-        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) = mpsc::channel::<String>(AUDIT_BACKLOG);
         tokio::task::spawn_blocking(move || {
             let mut w = std_writer;
             while let Some(line) = rx.blocking_recv() {
@@ -55,7 +61,8 @@ impl Audit {
         Ok(Self { tx: Some(tx) })
     }
 
-    /// Record an event; never blocks the data path.
+    /// Record an event; never blocks the data path (drops when the bounded
+    /// backlog is full).
     pub fn record(&self, rec: AuditRecord) {
         if let Some(tx) = &self.tx {
             let ts = SystemTime::now()
@@ -70,7 +77,7 @@ impl Audit {
                 "reason": rec.reason,
             })
             .to_string();
-            let _ = tx.send(line);
+            let _ = tx.try_send(line);
         }
     }
 }

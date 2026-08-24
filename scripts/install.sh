@@ -7,8 +7,11 @@
 #   ~/.cargo/bin/agentbox        the CLI (cargo install)
 #   ~/.agentbox/bin/mxc-*        MXC native binary (discovered or built here)
 #
-# The CLI finds mxc via AGENTBOX_MXC_BIN, PATH, ~/.agentbox/bin, or a sibling
-# mxc source checkout — this script guarantees one of the first two.
+# The CLI finds mxc via AGENTBOX_MXC_BIN, PATH, or ~/.agentbox/bin. A sibling
+# mxc source checkout is only trusted when explicitly opted in with
+# AGENTBOX_ALLOW_SIBLING_MXC=1 (a repo you clone can plant an executable at
+# that plausible-looking path — the sandbox launcher must not come from there
+# unless YOU put it there). This script guarantees one of the trust roots.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -59,8 +62,10 @@ if ! mxc_installed && [ -n "${AGENTBOX_MXC_BIN:-}" ]; then
   copy_if_exec "$AGENTBOX_MXC_BIN" || true
 fi
 
-# c) sibling source checkout (built output first; build only if needed)
-if ! mxc_installed; then
+# c) sibling source checkout — opt-in only (AGENTBOX_ALLOW_SIBLING_MXC=1):
+#    a repo you clone can plant an executable at this plausible-looking path,
+#    and that binary would run unsandboxed on the host as the sandbox launcher.
+if ! mxc_installed && [ "${AGENTBOX_ALLOW_SIBLING_MXC:-0}" = "1" ]; then
   d="$ROOT"
   while [ "$d" != "/" ]; do
     for c in \
@@ -82,8 +87,8 @@ if ! mxc_installed && command -v npm >/dev/null 2>&1; then
   fi
 fi
 
-# e) last resort: build from a sibling checkout (needs Xcode CLT / build tools)
-if ! mxc_installed; then
+# e) last resort: build from a sibling checkout — same opt-in gate as (c)
+if ! mxc_installed && [ "${AGENTBOX_ALLOW_SIBLING_MXC:-0}" = "1" ]; then
   d="$ROOT"
   while [ "$d" != "/" ]; do
     if [ -d "$d/mxc/src" ]; then
@@ -104,6 +109,8 @@ if ! mxc_installed; then
   log "WARNING: no mxc binary found."
   log "  Install it manually, e.g.:  npm i -g @microsoft/mxc-sdk"
   log "  then re-run this script, or set AGENTBOX_MXC_BIN to the binary path."
+  log "  A sibling ./mxc source checkout is only used when you explicitly set"
+  log "  AGENTBOX_ALLOW_SIBLING_MXC=1 (trust that checkout)."
   exit 2
 fi
 

@@ -46,6 +46,15 @@ pub struct RunOptions {
     /// config when the user has none. Trade-off: any local process could
     /// borrow this session's allowlist (mitigated by per-session random port).
     pub java_proxy_config: bool,
+    /// Opt-in (`--rw-toolchain-cache`): mount host toolchain caches
+    /// READ-WRITE. Default is read-only so a compromised sandbox cannot
+    /// poison host package-manager caches and persist into future host
+    /// builds (cross-session supply-chain attack).
+    pub rw_toolchain_cache: bool,
+    /// Opt-in (`--allow-private-dns`): disable the proxy's post-DNS guard so
+    /// allowlisted hostnames may resolve into loopback/link-local/RFC1918
+    /// space. Off by default; see ab-proxy `netguard`.
+    pub allow_private_dns: bool,
     pub keep_session: bool,
     pub dry_run: bool,
     pub debug: bool,
@@ -85,6 +94,29 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Write a file containing sensitive material (session config with injected
+/// secrets / proxy token), created 0600 from the start — never a window with
+/// looser permissions. Caller is responsible for the parent directory.
+fn write_secret_file(path: &Path, contents: &str) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(contents.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)?;
+    }
+    Ok(())
+}
+
 /// HostRule::parse with anyhow-compatible errors.
 fn rule(s: &str) -> anyhow::Result<ab_proxy::HostRule> {
     ab_proxy::HostRule::parse(s).map_err(|e| anyhow::anyhow!("{e}"))
@@ -92,7 +124,11 @@ fn rule(s: &str) -> anyhow::Result<ab_proxy::HostRule> {
 
 fn which(name: &str) -> Option<PathBuf> {
     let dirs = std::env::var("PATH").unwrap_or_default();
-    let sep = if std::env::consts::OS == "windows" { ";" } else { ":" };
+    let sep = if std::env::consts::OS == "windows" {
+        ";"
+    } else {
+        ":"
+    };
     for dir in dirs.split(sep) {
         if dir.is_empty() {
             continue;
@@ -196,9 +232,7 @@ fn binary_dirs(profile: &AgentProfile) -> Vec<PathBuf> {
         .collect()
 }
 
-fn parse_env_entries(
-    entries: &[String],
-) -> (Vec<(String, String)>, Vec<String>) {
+fn parse_env_entries(entries: &[String]) -> (Vec<(String, String)>, Vec<String>) {
     let mut out = Vec::new();
     let mut missing = Vec::new();
     for entry in entries {
@@ -241,7 +275,11 @@ fn build_allowlist(opts: &RunOptions) -> anyhow::Result<ab_proxy::HostFilter> {
         deny.push(rule(r)?);
     }
 
-    Ok(ab_proxy::HostFilter { allow, deny, allow_ip_literals: false })
+    Ok(ab_proxy::HostFilter {
+        allow,
+        deny,
+        allow_ip_literals: false,
+    })
 }
 
 /// Small credential/config FILES snapshotted into the session HOME so package
@@ -260,8 +298,12 @@ const TOOLCHAIN_CONFIG_FILES: &[&str] = &[
     ".config/go/env",
 ];
 
-/// Build-cache directories mounted READ-WRITE from the host so repeated
-/// builds reuse artifacts instead of re-downloading through the proxy.
+/// Build-cache directories shared with the sandbox. Mounted READ-ONLY by
+/// default: a compromised agent must not be able to write artifacts into
+/// host package-manager caches, where later UNSANDBOXED host builds would
+/// trust them (Maven/Gradle/pip do not re-verify cached artifacts by
+/// default) — that is a cross-session persistence path. Write access is
+/// opt-in via `--rw-toolchain-cache`.
 const TOOLCHAIN_CACHE_DIRS: &[&str] = &[
     ".m2/repository",
     ".gradle/caches",
@@ -272,11 +314,16 @@ const TOOLCHAIN_CACHE_DIRS: &[&str] = &[
     ".cargo/git/db",
 ];
 
-/// Apply toolchain config snapshots + cache mounts. Returns extra rw paths.
+/// Apply toolchain config snapshots + cache mounts. Config FILES are always
+/// snapshotted (they die with the session scratch). Cache DIRS come back as
+/// `(readonly_mounts, readwrite_mounts)` — the latter only when explicitly
+/// opted in.
 fn apply_toolchain_mounts(
     home: &Path,
     scratch_home: &Path,
-) -> Vec<PathBuf> {
+    rw_toolchain_cache: bool,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut ro = Vec::new();
     let mut rw = Vec::new();
 
     for rel in TOOLCHAIN_CONFIG_FILES {
@@ -299,12 +346,23 @@ fn apply_toolchain_mounts(
         if let Some(parent) = real.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        // Mount whether or not it exists yet — first build populates it and
-        // subsequent sessions reuse the host cache.
+        // Mount whether or not it exists yet. Read-only by default: reads
+        // still hit the warm host cache; writes land in the session scratch
+        // (or fail loudly), never in the host cache.
         std::fs::create_dir_all(&real).ok();
-        rw.push(real);
+        if rw_toolchain_cache {
+            eprintln!(
+                "agentbox: WARNING: ~/{rel} mounted READ-WRITE \
+                 (--rw-toolchain-cache): a compromised sandbox can poison this \
+                 host cache for future builds",
+                rel = rel
+            );
+            rw.push(real);
+        } else {
+            ro.push(real);
+        }
     }
-    rw
+    (ro, rw)
 }
 
 /// JVM proxy system properties for JAVA_TOOL_OPTIONS. Loopback is excluded:
@@ -494,7 +552,12 @@ async fn summarize_audit(path: &Path) -> Option<AuditSummary> {
     let mut top: Vec<(String, u64)> = denied_hosts.into_iter().collect();
     top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     top.truncate(5);
-    Some(AuditSummary { allowed, denied, errors, top_denied: top })
+    Some(AuditSummary {
+        allowed,
+        denied,
+        errors,
+        top_denied: top,
+    })
 }
 
 /// Execute one sandboxed agent session end-to-end.
@@ -505,9 +568,10 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
              Bubblewrap backends are wired. See README roadmap."
         );
     }
-    let workspace = opts.workspace.canonicalize().map_err(|e| {
-        anyhow::anyhow!("workspace {}: {e}", opts.workspace.display())
-    })?;
+    let workspace = opts
+        .workspace
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("workspace {}: {e}", opts.workspace.display()))?;
 
     // ---- Session scratch dir --------------------------------------------
     let nanos = std::time::SystemTime::now()
@@ -586,13 +650,18 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
             token: token.clone(),
             filter,
             audit_path: Some(audit_path.clone()),
+            allow_private_dns: opts.allow_private_dns,
             ..Default::default()
         })
         .await?;
         let port = bound.port;
         eprintln!(
             "agentbox: enforcing proxy on 127.0.0.1:{port} ({}, audit: {})",
-            if token.is_some() { "token-authenticated" } else { "unauthenticated (platform limit)" },
+            if token.is_some() {
+                "token-authenticated"
+            } else {
+                "unauthenticated (platform limit)"
+            },
             audit_path.display()
         );
         let url = match token {
@@ -624,9 +693,18 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
     let command_line = parts.join(" ");
 
     // ---- Filesystem policy -------------------------------------------------
+    // Toolchain caches default to READ-ONLY mounts (see TOOLCHAIN_CACHE_DIRS):
+    // the sandbox may read warm caches but never write into host state that
+    // later host-side builds trust. RW requires an explicit opt-in flag.
+    let (cache_ro, cache_rw) = if opts.no_toolchain_cache {
+        (Vec::new(), Vec::new())
+    } else {
+        apply_toolchain_mounts(&home, &scratch_home, opts.rw_toolchain_cache)
+    };
     let readonly = {
         let mut v = toolchain_roots();
         v.extend(binary_dirs(opts.profile));
+        v.extend(cache_ro);
         v.sort();
         v.dedup();
         v
@@ -636,26 +714,33 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
             let mut v = vec![workspace.clone(), scratch_home.clone(), scratch_tmp.clone()];
             v.extend(extra_rw_paths(opts.profile));
             v.extend(rw_extra.iter().cloned());
-            if !opts.no_toolchain_cache {
-                v.extend(apply_toolchain_mounts(&home, &scratch_home));
-            }
+            v.extend(cache_rw);
             v
         },
         readonly,
         denied: opts.denied_paths.clone(),
     };
 
-    let exec = ExecSpec { command_line, cwd: workspace, env: env_pairs };
+    let exec = ExecSpec {
+        command_line,
+        cwd: workspace,
+        env: env_pairs,
+    };
 
     let containment = crate::default_containment();
-    let seatbelt_opts =
-        SeatbeltOptions { nested_pty: true, keychain_access: opts.keychain };
+    let seatbelt_opts = SeatbeltOptions {
+        nested_pty: true,
+        keychain_access: opts.keychain,
+    };
 
     let config = build_config(
         containment,
         &exec,
         &fs,
-        &NetworkPosture { proxy_url: proxy_url.clone(), ingress_allow: opts.allow_listen },
+        &NetworkPosture {
+            proxy_url: proxy_url.clone(),
+            ingress_allow: opts.allow_listen,
+        },
         &seatbelt_opts,
     );
 
@@ -673,15 +758,20 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
     // ---- Locate mxc and spawn ----------------------------------------------
     let mxc = crate::find_mxc_binary().ok_or_else(|| {
         anyhow::anyhow!(
-            "mxc native binary `{}` not found (AGENTBOX_MXC_BIN, ~/.agentbox/bin, PATH, or sibling ./mxc build)",
+            "mxc native binary `{}` not found (AGENTBOX_MXC_BIN, ~/.agentbox/bin, PATH; \
+             or a sibling ./mxc build with AGENTBOX_ALLOW_SIBLING_MXC=1)",
             crate::mxc_binary_name()
         )
     })?;
 
-    let encoded = {
-        use base64::Engine;
-        base64::engine::general_purpose::STANDARD.encode(config.to_string())
-    };
+    // ---- Config delivery: 0600 file, never argv ---------------------------
+    // The config embeds every injected secret and (on macOS) the proxy
+    // token. Passing it as `--config-base64 <blob>` would expose all of it
+    // via the process argv, which is world-readable (`ps -ww` on macOS,
+    // `/proc/<pid>/cmdline` on Linux). A file inside the 0700 session dir,
+    // itself chmod 0600, leaks only an opaque path via argv.
+    let config_path = session_dir.join("mxc-config.json");
+    write_secret_file(&config_path, &config.to_string())?;
 
     eprintln!(
         "agentbox: launching {} ({}) for {}",
@@ -691,15 +781,21 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
     );
 
     let mut cmd = tokio::process::Command::new(&mxc);
-    cmd.arg("--config-base64").arg(&encoded).stdin(std::process::Stdio::inherit());
+    cmd.arg("--config")
+        .arg(&config_path)
+        .stdin(std::process::Stdio::inherit());
     if opts.debug {
         cmd.arg("--debug");
     }
     // stdin/stdout/stderr default to inherit in tokio when not configured;
     // make it explicit for clarity.
-    cmd.stdout(std::process::Stdio::inherit()).stderr(std::process::Stdio::inherit());
+    cmd.stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
 
-    let status = cmd.status().await.map_err(|e| anyhow::anyhow!("spawn mxc: {e}"))?;
+    let status = cmd
+        .status()
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn mxc: {e}"))?;
     let exit_code = status.code().unwrap_or(1);
 
     // ---- Teardown ----------------------------------------------------------
