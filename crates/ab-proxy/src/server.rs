@@ -8,16 +8,28 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{copy_bidirectional, AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::audit::{Audit, AuditRecord};
+use crate::netguard;
 use crate::rules::HostFilter;
 
 const MAX_HEAD_BYTES: usize = 32 * 1024;
+/// Per-**line** head timeout.
 const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Whole-request-head budget: a client feeding one slow line at a time must
+/// not hold a connection task (and a concurrency slot) forever.
+const HEAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DNS_TTL: Duration = Duration::from_secs(60);
+/// Default cap on concurrent client connections (`ProxyConfig::
+/// max_connections`). The proxy runs unsandboxed on the host and is reachable
+/// by the sandbox by design — without a cap a compromised agent can exhaust
+/// host FDs/memory.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
+/// Default hard cap on a single tunnel's total lifetime.
+pub const DEFAULT_TUNNEL_MAX_DURATION: Duration = Duration::from_secs(30 * 60);
 
 /// Proxy configuration.
 #[derive(Clone)]
@@ -33,6 +45,17 @@ pub struct ProxyConfig {
     pub token: Option<String>,
     pub filter: HostFilter,
     pub audit_path: Option<std::path::PathBuf>,
+    /// Post-DNS SSRF/rebinding guard: reject allowlisted *hostnames* whose
+    /// resolved address falls in loopback/link-local/RFC1918/ULA/... space.
+    /// Explicit IP-literal rules bypass this (deliberate configuration).
+    /// Default `false` (guard on) — see [`crate::netguard`].
+    pub allow_private_dns: bool,
+    /// Maximum concurrent client connections; excess connections are closed
+    /// immediately. Default [`DEFAULT_MAX_CONNECTIONS`].
+    pub max_connections: usize,
+    /// Hard cap on a single tunnel's total lifetime. Default
+    /// [`DEFAULT_TUNNEL_MAX_DURATION`]; `None` disables the cap.
+    pub tunnel_max_duration: Option<Duration>,
 }
 
 impl Default for ProxyConfig {
@@ -43,6 +66,9 @@ impl Default for ProxyConfig {
             token: None,
             filter: HostFilter::default(),
             audit_path: None,
+            allow_private_dns: false,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            tunnel_max_duration: Some(DEFAULT_TUNNEL_MAX_DURATION),
         }
     }
 }
@@ -97,6 +123,10 @@ pub async fn spawn(config: ProxyConfig) -> anyhow::Result<BoundProxy> {
 
     let dns_cache: Arc<Mutex<HashMap<String, (IpAddr, Instant)>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    // Concurrency cap: one permit per live connection; beyond the limit the
+    // accepted socket is closed immediately (never queued — a queue would
+    // still pin FDs and memory).
+    let connection_permits = Arc::new(Semaphore::new(config.max_connections.max(1)));
     let tls_tasks = tasks.clone();
     tokio::spawn(async move {
         loop {
@@ -108,8 +138,18 @@ pub async fn spawn(config: ProxyConfig) -> anyhow::Result<BoundProxy> {
                     let config = config.clone();
                     let audit = audit.clone();
                     let dns = dns_cache.clone();
+                    let Ok(permit) = connection_permits.clone().try_acquire_owned() else {
+                        audit.record(AuditRecord {
+                            event: "error",
+                            host: "-".into(),
+                            port: 0,
+                            reason: format!("connection limit reached ({})", config.max_connections),
+                        });
+                        drop(stream);
+                        continue;
+                    };
                     if let Ok(mut guard) = tls_tasks.lock() {
-                        guard.spawn(handle_connection(stream, peer, config, audit, dns));
+                        guard.spawn(handle_connection(stream, peer, config, audit, dns, permit));
                     }
                 }
             }
@@ -125,12 +165,19 @@ async fn handle_connection(
     config: Arc<ProxyConfig>,
     audit: Audit,
     dns: Arc<Mutex<HashMap<String, (IpAddr, Instant)>>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     let _ = stream.set_nodelay(true);
     let mut reader = tokio::io::BufReader::new(stream);
-    // Read the request head line by line until the blank line.
+    // Read the request head line by line until the blank line. Both a
+    // per-line timeout and a whole-head budget apply so slowly-fed sockets
+    // cannot hold tasks indefinitely.
+    let head_deadline = Instant::now() + HEAD_TOTAL_TIMEOUT;
     let mut head = Vec::with_capacity(512);
     loop {
+        if Instant::now() >= head_deadline {
+            return;
+        }
         let mut line = Vec::with_capacity(128);
         match tokio::time::timeout(HEAD_TIMEOUT, reader.read_until(b'\n', &mut line)).await {
             Ok(Ok(0)) | Err(_) | Ok(Err(_)) => return,
@@ -253,7 +300,8 @@ async fn handle_connection(
     });
 
     // ---- Upstream connect -------------------------------------------------
-    let upstream_addr = match resolve(&host_raw, port, &dns).await {
+    let host_is_ip_literal = host_raw.parse::<IpAddr>().is_ok();
+    let upstream_addr = match resolve(&host_raw, port, &dns, !config.allow_private_dns).await {
         Ok(a) => a,
         Err(e) => {
             audit.record(AuditRecord {
@@ -268,6 +316,33 @@ async fn handle_connection(
             return;
         }
     };
+
+    // ---- Post-DNS destination check (SSRF / DNS-rebinding guard) ---------
+    // A allowlisted hostname that resolves into loopback/link-local/RFC1918/
+    // ULA space would tunnel the sandbox straight to a host-local or LAN
+    // service in the proxy's network namespace. Explicit IP-literal rules
+    // already required deliberate configuration and bypass this check.
+    if !host_is_ip_literal && !config.allow_private_dns && netguard::is_protected_destination(upstream_addr)
+    {
+        let reason = format!(
+            "resolved `{host_raw}` -> {upstream_addr} is a protected address \
+             (loopback/link-local/private); refused (ssrf guard)"
+        );
+        audit.record(AuditRecord {
+            event: "deny",
+            host: host_raw.clone(),
+            port,
+            reason: reason.clone(),
+        });
+        write_simple_response(
+            reader.get_mut(),
+            "502 Bad Gateway",
+            &format!("agentbox: {reason}"),
+        )
+        .await
+        .ok();
+        return;
+    }
     let mut upstream =
         match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(SocketAddr::new(upstream_addr, port)))
             .await
@@ -302,7 +377,7 @@ async fn handle_connection(
             .ok();
         reader.get_mut().flush().await.ok();
         let mut client = reader.into_inner();
-        let _ = copy_bidirectional(&mut client, &mut upstream).await;
+        relay_with_lifetime(&mut client, &mut upstream, config.tunnel_max_duration).await;
     } else {
         // Plain HTTP: rewrite to origin-form and forward the head verbatim
         // minus hop-by-hop proxy headers. Remaining body bytes and the
@@ -341,7 +416,26 @@ async fn handle_connection(
         }
         up.flush().await.ok();
         let mut client = reader.into_inner();
-        let _ = copy_bidirectional(&mut client, &mut up).await;
+        relay_with_lifetime(&mut client, &mut up, config.tunnel_max_duration).await;
+    }
+}
+
+/// Bidirectional relay under an overall tunnel-lifetime cap: without it a
+/// single long-lived tunnel (or a deliberately never-closing one) would hold
+/// a concurrency slot — and two buffered streams — forever.
+async fn relay_with_lifetime<A, B>(a: &mut A, b: &mut B, max_duration: Option<Duration>)
+where
+    A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let relay = copy_bidirectional(a, b);
+    match max_duration {
+        Some(d) => {
+            let _ = tokio::time::timeout(d, relay).await;
+        }
+        None => {
+            let _ = relay.await;
+        }
     }
 }
 
@@ -391,10 +485,16 @@ async fn write_simple_response(
 /// Resolve at the proxy side with a tiny TTL cache. Prefers IPv4 so slirp /
 /// dual-stack oddities don't produce unreachable v6 upstreams on hosts
 /// without v6 egress.
+///
+/// When `avoid_protected` is set (SSRF guard active and not opted out), a
+/// non-protected address wins over a protected one when DNS returns several
+/// records — the guard then only fires for hostnames that resolve *only*
+/// into protected space.
 async fn resolve(
     host: &str,
     port: u16,
     cache: &Mutex<HashMap<String, (IpAddr, Instant)>>,
+    avoid_protected: bool,
 ) -> anyhow::Result<IpAddr> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(ip);
@@ -410,11 +510,15 @@ async fn resolve(
     let addrs = tokio::net::lookup_host((host, port))
         .await?
         .collect::<Vec<_>>();
+    if addrs.is_empty() {
+        anyhow::bail!("no addresses for {host}");
+    }
+    let clean = |a: &std::net::SocketAddr| !avoid_protected || !netguard::is_protected_destination(a.ip());
     let picked = addrs
         .iter()
-        .find(|a| a.is_ipv4())
-        .or_else(|| addrs.first())
-        .ok_or_else(|| anyhow::anyhow!("no addresses for {host}"))?
+        .find(|a| a.is_ipv4() && clean(a))
+        .or_else(|| addrs.iter().find(|a| clean(a)))
+        .unwrap_or_else(|| &addrs[0])
         .ip();
     if let Ok(mut cache) = cache.lock() {
         cache.insert(host.to_string(), (picked, Instant::now()));

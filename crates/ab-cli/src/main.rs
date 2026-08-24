@@ -290,6 +290,7 @@ async fn main() -> anyhow::Result<()> {
                 token,
                 filter,
                 audit_path: audit,
+                ..Default::default()
             })
             .await?;
             eprintln!("agentbox-proxy listening on {}", bound.addr);
