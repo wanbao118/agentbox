@@ -12,6 +12,8 @@ pub struct AuditRecord {
     pub host: String,
     pub port: u16,
     pub reason: String,
+    /// Whether a credential was injected for this request.
+    pub cred_injected: bool,
 }
 
 /// Maximum buffered audit lines before the writer catches up. Bounded so a
@@ -75,6 +77,7 @@ impl Audit {
                 "host": rec.host,
                 "port": rec.port,
                 "reason": rec.reason,
+                "cred_injected": rec.cred_injected,
             })
             .to_string();
             let _ = tx.try_send(line);

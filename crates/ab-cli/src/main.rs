@@ -86,6 +86,14 @@ enum Command {
         /// rules (`--allow 10.0.2.2:443`) always work without this.
         #[arg(long)]
         allow_private_dns: bool,
+        /// Inject a credential at the proxy level (not visible to sandbox).
+        /// Format: `host_pattern:header_name:ENV_VAR:value_prefix`
+        /// Example: `--credential '*.anthropic.com:authorization:ANTHROPIC_API_KEY:Bearer '`
+        #[arg(long = "credential")]
+        credential: Vec<String>,
+        /// Skip all default proxy credential injection (secrets stay in env).
+        #[arg(long)]
+        no_proxy_credentials: bool,
         /// Print the generated MXC config and exit.
         #[arg(long)]
         dry_run: bool,
@@ -148,6 +156,10 @@ enum Command {
         /// Max concurrent connections; excess are closed immediately.
         #[arg(long, default_value_t = ab_proxy::DEFAULT_MAX_CONNECTIONS)]
         max_connections: usize,
+        /// Inject credentials at the proxy level.
+        /// Format: `host_pattern:header_name:ENV_VAR:value_prefix`
+        #[arg(long = "credential")]
+        credential: Vec<String>,
     },
 }
 
@@ -208,12 +220,34 @@ async fn main() -> anyhow::Result<()> {
             strict,
             rw_toolchain_cache,
             allow_private_dns,
+            credential,
+            no_proxy_credentials,
             dry_run,
             keep_session,
             debug,
             passthrough,
         } => {
             let profile_ref = resolve_profile(&profile)?;
+
+            // Parse --credential flags: host_pattern:header:ENV_VAR:prefix
+            let mut extra_credential_rules = Vec::new();
+            for cred_str in &credential {
+                let parts: Vec<&str> = cred_str.splitn(4, ':').collect();
+                if parts.len() < 4 {
+                    anyhow::bail!(
+                        "invalid --credential format `{cred_str}` — expected \
+                         host_pattern:header_name:ENV_VAR:value_prefix"
+                    );
+                }
+                extra_credential_rules.push(ab_proxy::CredentialRule {
+                    host_pattern: parts[0].to_string(),
+                    ports: None,
+                    header_name: parts[1].to_string(),
+                    header_value_prefix: parts[3].to_string(),
+                    source: ab_proxy::CredentialSource::Env(parts[2].to_string()),
+                });
+            }
+
             let opts = ab_runtime::RunOptions {
                 profile: profile_ref,
                 workspace: workspace.unwrap_or_else(|| {
@@ -238,6 +272,8 @@ async fn main() -> anyhow::Result<()> {
                 java_proxy_config,
                 rw_toolchain_cache,
                 allow_private_dns,
+                extra_credential_rules,
+                no_proxy_credentials,
                 keep_session,
                 dry_run,
                 debug,
@@ -298,6 +334,19 @@ async fn main() -> anyhow::Result<()> {
                         );
                     }
                     println!("    secrets:     {}", p.secrets_env.join(", "));
+                    if !p.proxy_credentials.is_empty() {
+                        let cred_info: Vec<String> = p
+                            .proxy_credentials
+                            .iter()
+                            .map(|pc| {
+                                format!(
+                                    "{}->{}:{}[{}]",
+                                    pc.env_var, pc.host_pattern, pc.header, pc.value_prefix
+                                )
+                            })
+                            .collect();
+                        println!("    proxy creds: {}", cred_info.join(", "));
+                    }
                     println!(
                         "    net groups:  {}",
                         if p.default_groups.is_empty() {
@@ -344,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
             audit,
             allow_private_dns,
             max_connections,
+            credential,
         } => {
             let rule = |s: &str| -> anyhow::Result<ab_proxy::HostRule> {
                 ab_proxy::HostRule::parse(s).map_err(|e| anyhow::anyhow!("{e}"))
@@ -353,6 +403,32 @@ async fn main() -> anyhow::Result<()> {
                 deny: deny.iter().map(|d| rule(d)).collect::<Result<_, _>>()?,
                 allow_ip_literals: false,
             };
+
+            // Parse --credential flags.
+            let mut cred_rules = Vec::new();
+            for cred_str in &credential {
+                let parts: Vec<&str> = cred_str.splitn(4, ':').collect();
+                if parts.len() < 4 {
+                    anyhow::bail!(
+                        "invalid --credential format `{cred_str}` — expected \
+                         host_pattern:header_name:ENV_VAR:value_prefix"
+                    );
+                }
+                cred_rules.push(ab_proxy::CredentialRule {
+                    host_pattern: parts[0].to_string(),
+                    ports: None,
+                    header_name: parts[1].to_string(),
+                    header_value_prefix: parts[3].to_string(),
+                    source: ab_proxy::CredentialSource::Env(parts[2].to_string()),
+                });
+            }
+
+            let credential_store = if cred_rules.is_empty() {
+                None
+            } else {
+                Some(ab_proxy::CredentialStore::new(cred_rules))
+            };
+
             let bound = ab_proxy::spawn(ab_proxy::ProxyConfig {
                 bind_ip: std::net::IpAddr::from([127, 0, 0, 1]),
                 port: port.unwrap_or(0),
@@ -361,6 +437,7 @@ async fn main() -> anyhow::Result<()> {
                 audit_path: audit,
                 allow_private_dns,
                 max_connections,
+                credential_store,
                 ..Default::default()
             })
             .await?;

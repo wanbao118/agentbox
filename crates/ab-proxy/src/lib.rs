@@ -26,11 +26,15 @@
 //!   iteration.
 
 pub mod audit;
+pub mod credential;
+pub mod mitm;
 pub mod netguard;
 pub mod rules;
 pub mod server;
 
 pub use audit::{Audit, AuditRecord};
+pub use credential::{CredentialMatch, CredentialRule, CredentialSource, CredentialStore};
+pub use mitm::MitmCa;
 pub use netguard::is_protected_destination;
 pub use rules::{normalize_host, HostFilter, HostRule};
 pub use server::{

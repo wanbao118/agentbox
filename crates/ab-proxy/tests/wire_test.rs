@@ -365,3 +365,145 @@ async fn tunnel_lifetime_cap_closes_long_tunnels() {
     assert!(got_eof, "tunnel was not torn down at the lifetime cap");
     up_task.abort();
 }
+
+// ---- Credential injection tests ------------------------------------------
+
+use ab_proxy::{CredentialRule, CredentialSource, CredentialStore};
+
+fn make_cred_store(env_key: &str, env_val: &str) -> CredentialStore {
+    std::env::set_var(env_key, env_val);
+    CredentialStore::new(vec![CredentialRule {
+        host_pattern: "127.0.0.1".into(),
+        ports: None,
+        header_name: "authorization".into(),
+        header_value_prefix: "Bearer ".into(),
+        source: CredentialSource::Env(env_key.into()),
+    }])
+}
+
+/// HTTP request through proxy with credential injection: the upstream must
+/// receive the injected `Authorization` header (not the agent's).
+#[tokio::test]
+async fn http_credential_injection_adds_auth_header() {
+    let (up_port, up_task) = spawn_upstream().await;
+    let store = make_cred_store("TEST_WIRE_KEY", "sk-test-wire-12345");
+
+    let cfg = ProxyConfig {
+        port: 0,
+        filter: HostFilter::new(vec![HostRule::parse("127.0.0.1").unwrap()], vec![]),
+        credential_store: Some(store),
+        ..Default::default()
+    };
+    let bound = spawn(cfg).await.unwrap();
+
+    // Send a plain HTTP GET through the proxy (no auth header from agent).
+    let mut s = TcpStream::connect(("127.0.0.1", bound.port)).await.unwrap();
+    let req = format!(
+        "GET http://127.0.0.1:{up_port}/test HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+
+    // The upstream echo server reflects the first line of the request.
+    let mut buf = vec![0u8; 4096];
+    let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let echoed = String::from_utf8_lossy(&buf[..n]);
+
+    // The echoed request should contain the injected Authorization header.
+    assert!(
+        echoed.contains("authorization: Bearer sk-test-wire-12345"),
+        "expected injected auth header in upstream request, got:\n{echoed}"
+    );
+
+    std::env::remove_var("TEST_WIRE_KEY");
+    up_task.abort();
+}
+
+/// When the agent sends its own Authorization header, the proxy must strip
+/// it and inject the real credential instead.
+#[tokio::test]
+async fn http_credential_injection_strips_agent_auth() {
+    let (up_port, up_task) = spawn_upstream().await;
+    let store = make_cred_store("TEST_WIRE_KEY2", "sk-real-key");
+
+    let cfg = ProxyConfig {
+        port: 0,
+        filter: HostFilter::new(vec![HostRule::parse("127.0.0.1").unwrap()], vec![]),
+        credential_store: Some(store),
+        ..Default::default()
+    };
+    let bound = spawn(cfg).await.unwrap();
+
+    // Send request with a fake agent-provided auth header.
+    let mut s = TcpStream::connect(("127.0.0.1", bound.port)).await.unwrap();
+    let req = format!(
+        "GET http://127.0.0.1:{up_port}/test HTTP/1.1\r\n\
+         Host: 127.0.0.1\r\n\
+         Authorization: Bearer fake-agent-token\r\n\
+         \r\n"
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = vec![0u8; 4096];
+    let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let echoed = String::from_utf8_lossy(&buf[..n]);
+
+    // Must NOT contain the agent's fake token.
+    assert!(
+        !echoed.contains("fake-agent-token"),
+        "agent's fake auth header should have been stripped, got:\n{echoed}"
+    );
+    // Must contain the real injected credential.
+    assert!(
+        echoed.contains("authorization: Bearer sk-real-key"),
+        "expected real credential injected, got:\n{echoed}"
+    );
+
+    std::env::remove_var("TEST_WIRE_KEY2");
+    up_task.abort();
+}
+
+/// When no credential rule matches, the proxy passes headers through as-is
+/// (no injection, no stripping).
+#[tokio::test]
+async fn http_no_credential_rule_passes_through() {
+    let (up_port, up_task) = spawn_upstream().await;
+    // Empty store — no rules match.
+    let store = CredentialStore::new(vec![]);
+
+    let cfg = ProxyConfig {
+        port: 0,
+        filter: HostFilter::new(vec![HostRule::parse("127.0.0.1").unwrap()], vec![]),
+        credential_store: Some(store),
+        ..Default::default()
+    };
+    let bound = spawn(cfg).await.unwrap();
+
+    let mut s = TcpStream::connect(("127.0.0.1", bound.port)).await.unwrap();
+    let req = format!(
+        "GET http://127.0.0.1:{up_port}/test HTTP/1.1\r\n\
+         Host: 127.0.0.1\r\n\
+         Authorization: Bearer agent-original\r\n\
+         \r\n"
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = vec![0u8; 4096];
+    let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let echoed = String::from_utf8_lossy(&buf[..n]);
+
+    // Agent's original auth header should pass through untouched.
+    assert!(
+        echoed.contains("authorization: Bearer agent-original"),
+        "agent header should pass through when no rule matches, got:\n{echoed}"
+    );
+    up_task.abort();
+}

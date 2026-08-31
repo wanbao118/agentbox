@@ -56,6 +56,16 @@ pub struct ProxyConfig {
     /// Hard cap on a single tunnel's total lifetime. Default
     /// [`DEFAULT_TUNNEL_MAX_DURATION`]; `None` disables the cap.
     pub tunnel_max_duration: Option<Duration>,
+    /// Credential injection rules. When present, the proxy intercepts
+    /// matching HTTP/HTTPS requests, strips any agent-provided auth header,
+    /// and injects the credential from this store. The sandbox never sees
+    /// the actual secret values.
+    pub credential_store: Option<crate::credential::CredentialStore>,
+    /// Per-session CA for MITM HTTPS credential injection. When present
+    /// alongside `credential_store`, CONNECT requests to matching hosts are
+    /// intercepted (TLS terminated, credential injected, re-encrypted)
+    /// instead of being tunneled as raw relay.
+    pub mitm_ca: Option<Arc<crate::MitmCa>>,
 }
 
 impl Default for ProxyConfig {
@@ -69,6 +79,8 @@ impl Default for ProxyConfig {
             allow_private_dns: false,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             tunnel_max_duration: Some(DEFAULT_TUNNEL_MAX_DURATION),
+            credential_store: None,
+            mitm_ca: None,
         }
     }
 }
@@ -144,6 +156,7 @@ pub async fn spawn(config: ProxyConfig) -> anyhow::Result<BoundProxy> {
                             host: "-".into(),
                             port: 0,
                             reason: format!("connection limit reached ({})", config.max_connections),
+                            cred_injected: false,
                         });
                         drop(stream);
                         continue;
@@ -243,6 +256,7 @@ async fn handle_connection(
                 host: "-".into(),
                 port: 0,
                 reason: format!("auth failed from {peer}"),
+                cred_injected: false,
             });
             write_simple_response(
                 reader.get_mut(),
@@ -297,6 +311,7 @@ async fn handle_connection(
             host: host_raw.clone(),
             port,
             reason: decision.reason.clone(),
+            cred_injected: false,
         });
         write_simple_response(
             reader.get_mut(),
@@ -307,12 +322,6 @@ async fn handle_connection(
         .ok();
         return;
     }
-    audit.record(AuditRecord {
-        event: "allow",
-        host: host_raw.clone(),
-        port,
-        reason: decision.reason.clone(),
-    });
 
     // ---- Upstream connect -------------------------------------------------
     let host_is_ip_literal = host_raw.parse::<IpAddr>().is_ok();
@@ -324,6 +333,7 @@ async fn handle_connection(
                 host: host_raw.clone(),
                 port,
                 reason: format!("dns: {e}"),
+                cred_injected: false,
             });
             write_simple_response(reader.get_mut(), "502 Bad Gateway", "dns resolution failed")
                 .await
@@ -350,6 +360,7 @@ async fn handle_connection(
             host: host_raw.clone(),
             port,
             reason: reason.clone(),
+            cred_injected: false,
         });
         write_simple_response(
             reader.get_mut(),
@@ -373,6 +384,7 @@ async fn handle_connection(
                 host: host_raw.clone(),
                 port,
                 reason: format!("connect: {e}"),
+                cred_injected: false,
             });
             write_simple_response(
                 reader.get_mut(),
@@ -392,6 +404,55 @@ async fn handle_connection(
     };
 
     if method == "CONNECT" {
+        // Check if credential injection applies — if so, MITM the TLS
+        // connection instead of creating a raw tunnel.
+        let cred_match = config
+            .credential_store
+            .as_ref()
+            .and_then(|cs| cs.find_injection(&host_raw, port));
+
+        if let (Some(cm), Some(ca)) = (&cred_match, &config.mitm_ca) {
+            // MITM path: take ownership of the raw TCP stream, terminate TLS
+            // locally, inject credentials, and relay to upstream.
+            let client_stream = reader.into_inner();
+            let audit = audit.clone();
+            let hostname = host_raw.clone();
+            let cred_header = cm.header_name.to_string();
+            let cred_value = cm.header_value.clone();
+            // Drop the upstream we opened — MITM will create its own TLS connection.
+            drop(upstream);
+
+            let result = crate::mitm::mitm_connect(
+                client_stream,
+                SocketAddr::new(upstream_addr, port),
+                &hostname,
+                ca,
+                &cred_header,
+                &cred_value,
+                &audit,
+            )
+            .await;
+
+            if let Err(e) = result {
+                audit.record(AuditRecord {
+                    event: "error",
+                    host: hostname,
+                    port,
+                    reason: format!("mitm: {e}"),
+                    cred_injected: false,
+                });
+            }
+            return;
+        }
+
+        // Standard raw tunnel path (no credential rule → opaque relay).
+        audit.record(AuditRecord {
+            event: "allow",
+            host: host_raw.clone(),
+            port,
+            reason: decision.reason.clone(),
+            cred_injected: false,
+        });
         let _ = upstream.set_nodelay(true);
         reader
             .get_mut()
@@ -403,8 +464,9 @@ async fn handle_connection(
         relay_with_lifetime(&mut client, &mut upstream, config.tunnel_max_duration).await;
     } else {
         // Plain HTTP: rewrite to origin-form and forward the head verbatim
-        // minus hop-by-hop proxy headers. Remaining body bytes and the
-        // response flow through the bidirectional relay.
+        // minus hop-by-hop proxy headers. When a credential rule matches the
+        // destination, the proxy strips any agent-provided auth header and
+        // injects the real credential — the sandbox never sees the secret.
         let path = {
             let mut p = target.clone();
             if let Some(rest) = target.strip_prefix("http://") {
@@ -423,6 +485,13 @@ async fn handle_connection(
                 "HTTP/1.1".to_string()
             }
         };
+
+        // Check if credential injection applies to this destination.
+        let cred_match = config
+            .credential_store
+            .as_ref()
+            .and_then(|cs| cs.find_injection(&host_raw, port));
+
         let mut out = format!("{method} {path} {version}\r\n");
         out.push_str(&format!("Host: {host_raw}\r\n"));
         for (k, v) in &headers {
@@ -434,9 +503,32 @@ async fn handle_connection(
             {
                 continue;
             }
+            // When credential injection is active for this host, strip any
+            // agent-provided auth header (the agent must not control auth).
+            if let Some(cm) = &cred_match {
+                if k == cm.header_name {
+                    continue;
+                }
+            }
             out.push_str(&format!("{k}: {v}\r\n"));
         }
+        // Inject the credential header from the store.
+        let cred_injected = if let Some(cm) = &cred_match {
+            out.push_str(&format!("{}: {}\r\n", cm.header_name, cm.header_value));
+            true
+        } else {
+            false
+        };
         out.push_str("Connection: close\r\n\r\n");
+
+        audit.record(AuditRecord {
+            event: "allow",
+            host: host_raw.clone(),
+            port,
+            reason: decision.reason.clone(),
+            cred_injected,
+        });
+
         let mut up = upstream;
         if up.write_all(out.as_bytes()).await.is_err() {
             return;

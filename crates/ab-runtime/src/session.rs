@@ -55,6 +55,11 @@ pub struct RunOptions {
     /// allowlisted hostnames may resolve into loopback/link-local/RFC1918
     /// space. Off by default; see ab-proxy `netguard`.
     pub allow_private_dns: bool,
+    /// Additional credential rules from CLI `--credential` flags.
+    /// Merged with profile defaults.
+    pub extra_credential_rules: Vec<ab_proxy::CredentialRule>,
+    /// Skip all proxy credential injection (old behavior: secrets in env).
+    pub no_proxy_credentials: bool,
     pub keep_session: bool,
     pub dry_run: bool,
     pub debug: bool,
@@ -455,6 +460,7 @@ fn build_env(
     scratch_home: &Path,
     scratch_tmp: &Path,
     jvm_props: Option<String>,
+    ca_cert_path: Option<&Path>,
 ) -> anyhow::Result<Vec<(String, String)>> {
     let mut env: HashMap<String, String> = HashMap::new();
 
@@ -471,6 +477,10 @@ fn build_env(
     // tools that `mkdir $(tmpdir)/<name>` (Bun/opencode, pip, npm) land in a
     // writable path instead of getting EPERM on the host /tmp.
     env.insert("TMPDIR".into(), scratch_tmp.display().to_string());
+    // When MITM CA is active, tell TLS libraries to trust the proxy CA cert.
+    if let Some(ca_path) = ca_cert_path {
+        env.insert("SSL_CERT_FILE".into(), ca_path.display().to_string());
+    }
     // Align every JVM's temp dir with the sandbox-writable TMPDIR. This is
     // what makes the JDK attach API work between two in-sandbox JVMs (attach
     // protocol creates .attach_pid<pid> in the shared tmp) and keeps
@@ -496,8 +506,27 @@ fn build_env(
     }
 
     // Profile secrets that exist on the host.
+    // When proxy credential injection is active, env vars listed in
+    // proxy_credentials are NOT forwarded to the sandbox — the proxy injects
+    // them at the HTTP layer instead.
+    let proxy_cred_env_vars: std::collections::HashSet<&str> = opts
+        .profile
+        .proxy_credentials
+        .iter()
+        .map(|pc| pc.env_var)
+        .chain(opts.extra_credential_rules.iter().map(|r| {
+            // Extra rules from --credential flags: extract env var name from source.
+            match &r.source {
+                ab_proxy::CredentialSource::Env(name) => name.as_str(),
+            }
+        }))
+        .collect();
     let mut warned_missing: Vec<String> = Vec::new();
     for key in opts.profile.secrets_env {
+        // Skip env vars that are handled by proxy credential injection.
+        if !opts.no_proxy_credentials && proxy_cred_env_vars.contains(*key) {
+            continue;
+        }
         match std::env::var(key) {
             Ok(v) if !v.is_empty() => {
                 env.insert((*key).to_string(), v);
@@ -630,6 +659,7 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
     }
 
     // ---- Proxy -----------------------------------------------------------
+    let ca_cert_path = session_dir.join("proxy-ca.pem");
     let (bound, proxy_url, proxy_port): (
         Option<ab_proxy::BoundProxy>,
         Option<String>,
@@ -657,6 +687,47 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
             }
             None
         };
+
+        // ---- Credential injection (proxy-side secrets) -------------------
+        let credential_store = if opts.no_proxy_credentials {
+            None
+        } else {
+            let mut rules = ab_profiles::proxy_credential_rules(opts.profile);
+            rules.extend(opts.extra_credential_rules.iter().cloned());
+            if rules.is_empty() {
+                None
+            } else {
+                let store = ab_proxy::CredentialStore::new(rules);
+                eprintln!(
+                    "agentbox: credential injection active for {} host pattern(s)",
+                    store.rules().len()
+                );
+                Some(store)
+            }
+        };
+
+        // Generate MITM CA when credential injection is active (needed for
+        // HTTPS CONNECT interception).
+        let mitm_ca = if credential_store.is_some() {
+            match ab_proxy::MitmCa::generate() {
+                Ok(ca) => {
+                    // Write CA cert to session dir for sandbox trust.
+                    write_secret_file(&ca_cert_path, ca.ca_cert_pem())?;
+                    eprintln!(
+                        "agentbox: MITM CA written to {} (sandbox will trust via SSL_CERT_FILE)",
+                        ca_cert_path.display()
+                    );
+                    Some(std::sync::Arc::new(ca))
+                }
+                Err(e) => {
+                    eprintln!("agentbox: warning: MITM CA generation failed: {e} — HTTPS credential injection disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let audit_path = session_dir.join("proxy-audit.jsonl");
         let bound = ab_proxy::spawn(ab_proxy::ProxyConfig {
             port: 0,
@@ -664,6 +735,8 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
             filter,
             audit_path: Some(audit_path.clone()),
             allow_private_dns: opts.allow_private_dns,
+            credential_store,
+            mitm_ca,
             ..Default::default()
         })
         .await?;
@@ -695,7 +768,17 @@ pub async fn run_session(opts: RunOptions) -> anyhow::Result<SessionOutcome> {
     };
 
     // ---- Environment -----------------------------------------------------
-    let env_pairs = build_env(&opts, &scratch_home, &scratch_tmp, jvm_props)?;
+    let env_pairs = build_env(
+        &opts,
+        &scratch_home,
+        &scratch_tmp,
+        jvm_props,
+        if ca_cert_path.exists() {
+            Some(&ca_cert_path)
+        } else {
+            None
+        },
+    )?;
 
     // ---- Command line ----------------------------------------------------
     let bin = which(opts.profile.binaries[0])

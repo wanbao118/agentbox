@@ -83,6 +83,10 @@ pub struct AgentProfile {
     pub home_specs: &'static [HomeSpec],
     /// Environment variables forwarded when present on the host.
     pub secrets_env: &'static [&'static str],
+    /// Credentials injected at the proxy layer (not visible to the sandbox).
+    /// The proxy reads `env_var` from the host at startup and injects it as
+    /// `header` for requests matching `host_pattern`.
+    pub proxy_credentials: &'static [ProxyCredential],
     /// Baseline network allowlist (always applied).
     pub net_allow: &'static [&'static str],
     /// Groups recommended by default for this agent (`--net-preset base`
@@ -94,8 +98,23 @@ pub struct AgentProfile {
     pub notes: &'static str,
 }
 
+/// A credential injected at the proxy layer instead of passed to the sandbox.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct ProxyCredential {
+    /// Host pattern — same syntax as [`ab_proxy::HostRule`]:
+    /// - `api.anthropic.com` — exact match
+    /// - `*.anthropic.com` — any subdomain (not bare apex)
+    pub host_pattern: &'static str,
+    /// Header name to inject, e.g. `"authorization"`.
+    pub header: &'static str,
+    /// Host environment variable containing the secret value.
+    pub env_var: &'static str,
+    /// Prefix prepended to the env var value, e.g. `"Bearer "`.
+    pub value_prefix: &'static str,
+}
+
+/// Non-sensitive Anthropic config vars (forwarded to sandbox env).
 const ANTHROPIC_ENV: &[&str] = &[
-    "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_OAUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
@@ -110,6 +129,22 @@ const ANTHROPIC_ENV: &[&str] = &[
     "AWS_SESSION_TOKEN",
 ];
 
+/// Proxy credential rules for Anthropic API key injection.
+const ANTHROPIC_PROXY_CREDS: &[ProxyCredential] = &[
+    ProxyCredential {
+        host_pattern: "*.anthropic.com",
+        header: "authorization",
+        env_var: "ANTHROPIC_API_KEY",
+        value_prefix: "Bearer ",
+    },
+    ProxyCredential {
+        host_pattern: "claude.ai",
+        header: "authorization",
+        env_var: "ANTHROPIC_API_KEY",
+        value_prefix: "Bearer ",
+    },
+];
+
 pub const CLAUDE_CODE: AgentProfile = AgentProfile {
     id: "claude-code",
     display: "Claude Code (Anthropic)",
@@ -119,6 +154,7 @@ pub const CLAUDE_CODE: AgentProfile = AgentProfile {
         optional: false,
     }],
     secrets_env: ANTHROPIC_ENV,
+    proxy_credentials: ANTHROPIC_PROXY_CREDS,
     net_allow: &[
         "api.anthropic.com",
         "*.anthropic.com",
@@ -140,11 +176,23 @@ pub const CODEX: AgentProfile = AgentProfile {
         optional: false,
     }],
     secrets_env: &[
-        "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "CODEX_HOME",
-        "AZURE_OPENAI_API_KEY",
         "OPENAI_AZURE_ENDPOINT",
+    ],
+    proxy_credentials: &[
+        ProxyCredential {
+            host_pattern: "*.openai.com",
+            header: "authorization",
+            env_var: "OPENAI_API_KEY",
+            value_prefix: "Bearer ",
+        },
+        ProxyCredential {
+            host_pattern: "*.chatgpt.com",
+            header: "authorization",
+            env_var: "OPENAI_API_KEY",
+            value_prefix: "Bearer ",
+        },
     ],
     net_allow: &[
         "chatgpt.com",
@@ -170,12 +218,18 @@ pub const GEMINI: AgentProfile = AgentProfile {
         optional: false,
     }],
     secrets_env: &[
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
         "GOOGLE_GENAI_USE_VERTEXAI",
         "GOOGLE_CLOUD_PROJECT",
         "GOOGLE_CLOUD_LOCATION",
         "GOOGLE_APPLICATION_CREDENTIALS",
+    ],
+    proxy_credentials: &[
+        ProxyCredential {
+            host_pattern: "*.googleapis.com",
+            header: "x-goog-api-key",
+            env_var: "GEMINI_API_KEY",
+            value_prefix: "",
+        },
     ],
     net_allow: &[
         "cloudcode-pa.googleapis.com",
@@ -205,16 +259,41 @@ pub const AIDER: AgentProfile = AgentProfile {
         },
     ],
     secrets_env: &[
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "OPENROUTER_API_KEY",
         "OLLAMA_API_BASE",
         "AZURE_API_VERSION",
-        "AZURE_API_KEY",
         "AZURE_ENDPOINT",
+    ],
+    proxy_credentials: &[
+        ProxyCredential {
+            host_pattern: "*.openai.com",
+            header: "authorization",
+            env_var: "OPENAI_API_KEY",
+            value_prefix: "Bearer ",
+        },
+        ProxyCredential {
+            host_pattern: "*.anthropic.com",
+            header: "authorization",
+            env_var: "ANTHROPIC_API_KEY",
+            value_prefix: "Bearer ",
+        },
+        ProxyCredential {
+            host_pattern: "*.googleapis.com",
+            header: "x-goog-api-key",
+            env_var: "GEMINI_API_KEY",
+            value_prefix: "",
+        },
+        ProxyCredential {
+            host_pattern: "api.deepseek.com",
+            header: "authorization",
+            env_var: "DEEPSEEK_API_KEY",
+            value_prefix: "Bearer ",
+        },
+        ProxyCredential {
+            host_pattern: "*.openrouter.ai",
+            header: "authorization",
+            env_var: "OPENROUTER_API_KEY",
+            value_prefix: "Bearer ",
+        },
     ],
     net_allow: &["api.deepseek.com", "deepseek.com", "*.deepseek.com"],
     default_groups: &["packages-pip"],
@@ -238,16 +317,56 @@ pub const OPENCODE: AgentProfile = AgentProfile {
             optional: true,
         },
     ],
-    secrets_env: &[
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "GOOGLE_API_KEY",
-        "GEMINI_API_KEY",
-        "OPENROUTER_API_KEY",
-        "XAI_API_KEY",
-        "GROQ_API_KEY",
-        "MISTRAL_API_KEY",
-        "DEEPSEEK_API_KEY",
+    secrets_env: &[],
+    proxy_credentials: &[
+        ProxyCredential {
+            host_pattern: "*.openai.com",
+            header: "authorization",
+            env_var: "OPENAI_API_KEY",
+            value_prefix: "Bearer ",
+        },
+        ProxyCredential {
+            host_pattern: "*.anthropic.com",
+            header: "authorization",
+            env_var: "ANTHROPIC_API_KEY",
+            value_prefix: "Bearer ",
+        },
+        ProxyCredential {
+            host_pattern: "*.googleapis.com",
+            header: "x-goog-api-key",
+            env_var: "GEMINI_API_KEY",
+            value_prefix: "",
+        },
+        ProxyCredential {
+            host_pattern: "*.openrouter.ai",
+            header: "authorization",
+            env_var: "OPENROUTER_API_KEY",
+            value_prefix: "Bearer ",
+        },
+        ProxyCredential {
+            host_pattern: "api.x.ai",
+            header: "authorization",
+            env_var: "XAI_API_KEY",
+            value_prefix: "Bearer ",
+        },
+        ProxyCredential {
+            host_pattern: "*.groq.com",
+            header: "authorization",
+            env_var: "GROQ_API_KEY",
+            value_prefix: "Bearer ",
+        },
+        ProxyCredential {
+            host_pattern: "*.mistral.ai",
+            header: "authorization",
+            env_var: "MISTRAL_API_KEY",
+            value_prefix: "Bearer ",
+        },
+        ProxyCredential {
+            host_pattern: "api.deepseek.com",
+            header: "authorization",
+            env_var: "DEEPSEEK_API_KEY",
+            value_prefix: "Bearer ",
+        },
     ],
     net_allow: &[
         "models.dev",
@@ -277,6 +396,7 @@ pub const SHELL: AgentProfile = AgentProfile {
     binaries: &["bash"],
     home_specs: &[],
     secrets_env: &[],
+    proxy_credentials: &[],
     net_allow: &[],
     default_groups: &[],
     extra_rw: &[],
@@ -318,6 +438,24 @@ pub fn effective_rules(profile: &AgentProfile) -> Vec<&'static str> {
         }
     }
     out
+}
+
+/// Convert a profile's `proxy_credentials` into `CredentialRule`s for the
+/// proxy's `CredentialStore`.  Host env vars are resolved lazily by the store.
+pub fn proxy_credential_rules(
+    profile: &AgentProfile,
+) -> Vec<ab_proxy::CredentialRule> {
+    profile
+        .proxy_credentials
+        .iter()
+        .map(|pc| ab_proxy::CredentialRule {
+            host_pattern: pc.host_pattern.to_string(),
+            ports: None,
+            header_name: pc.header.to_string(),
+            header_value_prefix: pc.value_prefix.to_string(),
+            source: ab_proxy::CredentialSource::Env(pc.env_var.to_string()),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -376,5 +514,36 @@ mod tests {
             }
             assert!(!effective_rules(p).is_empty(), "{}", p.id);
         }
+    }
+
+    #[test]
+    fn proxy_credentials_parse() {
+        for p in PROFILES {
+            for pc in p.proxy_credentials {
+                // Host pattern must be non-empty.
+                assert!(!pc.host_pattern.is_empty(), "{}: empty host_pattern", p.id);
+                // Header must be non-empty.
+                assert!(!pc.header.is_empty(), "{}: empty header", p.id);
+                // Env var must be UPPER_CASE_WITH_UNDERSCORES.
+                assert!(
+                    pc.env_var
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+                    "{}: env_var `{}` has invalid chars",
+                    p.id,
+                    pc.env_var
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn proxy_credential_rules_conversion() {
+        let rules = proxy_credential_rules(&CLAUDE_CODE);
+        assert!(!rules.is_empty());
+        // First rule should match *.anthropic.com
+        assert_eq!(rules[0].host_pattern, "*.anthropic.com");
+        assert_eq!(rules[0].header_name, "authorization");
+        assert_eq!(rules[0].header_value_prefix, "Bearer ");
     }
 }
