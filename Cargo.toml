@@ -20,7 +20,7 @@ anyhow = "1"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 url = "2"
-base64 = "0.22"
+base64 = "0.23"
 rand = "0.8"
 tempfile = "3"
 walkdir = "2"
