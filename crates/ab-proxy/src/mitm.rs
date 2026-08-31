@@ -230,7 +230,8 @@ mod tests {
 
     #[test]
     fn inject_header_replaces_existing() {
-        let req = b"GET /test HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer old\r\n\r\n";
+        let req =
+            b"GET /test HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: Bearer old\r\n\r\n";
         let out = inject_header(req, "authorization", "Bearer new");
         let s = String::from_utf8_lossy(&out);
         assert!(!s.contains("old"));
@@ -239,7 +240,8 @@ mod tests {
 
     #[test]
     fn inject_header_case_insensitive() {
-        let req = b"GET /test HTTP/1.1\r\nHost: api.example.com\r\nAUTHORIZATION: Bearer old\r\n\r\n";
+        let req =
+            b"GET /test HTTP/1.1\r\nHost: api.example.com\r\nAUTHORIZATION: Bearer old\r\n\r\n";
         let out = inject_header(req, "authorization", "Bearer new");
         let s = String::from_utf8_lossy(&out);
         assert!(!s.contains("old"));

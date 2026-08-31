@@ -60,9 +60,7 @@ impl CredentialStore {
             .iter()
             .map(|r| {
                 let secret = match &r.source {
-                    CredentialSource::Env(name) => {
-                        std::env::var(name).unwrap_or_default()
-                    }
+                    CredentialSource::Env(name) => std::env::var(name).unwrap_or_default(),
                 };
                 format!("{}{}", r.header_value_prefix, secret)
             })

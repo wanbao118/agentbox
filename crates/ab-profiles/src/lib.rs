@@ -175,11 +175,7 @@ pub const CODEX: AgentProfile = AgentProfile {
         rel: ".codex",
         optional: false,
     }],
-    secrets_env: &[
-        "OPENAI_BASE_URL",
-        "CODEX_HOME",
-        "OPENAI_AZURE_ENDPOINT",
-    ],
+    secrets_env: &["OPENAI_BASE_URL", "CODEX_HOME", "OPENAI_AZURE_ENDPOINT"],
     proxy_credentials: &[
         ProxyCredential {
             host_pattern: "*.openai.com",
@@ -223,14 +219,12 @@ pub const GEMINI: AgentProfile = AgentProfile {
         "GOOGLE_CLOUD_LOCATION",
         "GOOGLE_APPLICATION_CREDENTIALS",
     ],
-    proxy_credentials: &[
-        ProxyCredential {
-            host_pattern: "*.googleapis.com",
-            header: "x-goog-api-key",
-            env_var: "GEMINI_API_KEY",
-            value_prefix: "",
-        },
-    ],
+    proxy_credentials: &[ProxyCredential {
+        host_pattern: "*.googleapis.com",
+        header: "x-goog-api-key",
+        env_var: "GEMINI_API_KEY",
+        value_prefix: "",
+    }],
     net_allow: &[
         "cloudcode-pa.googleapis.com",
         "generativelanguage.googleapis.com",
@@ -258,11 +252,7 @@ pub const AIDER: AgentProfile = AgentProfile {
             optional: true,
         },
     ],
-    secrets_env: &[
-        "OLLAMA_API_BASE",
-        "AZURE_API_VERSION",
-        "AZURE_ENDPOINT",
-    ],
+    secrets_env: &["OLLAMA_API_BASE", "AZURE_API_VERSION", "AZURE_ENDPOINT"],
     proxy_credentials: &[
         ProxyCredential {
             host_pattern: "*.openai.com",
@@ -442,9 +432,7 @@ pub fn effective_rules(profile: &AgentProfile) -> Vec<&'static str> {
 
 /// Convert a profile's `proxy_credentials` into `CredentialRule`s for the
 /// proxy's `CredentialStore`.  Host env vars are resolved lazily by the store.
-pub fn proxy_credential_rules(
-    profile: &AgentProfile,
-) -> Vec<ab_proxy::CredentialRule> {
+pub fn proxy_credential_rules(profile: &AgentProfile) -> Vec<ab_proxy::CredentialRule> {
     profile
         .proxy_credentials
         .iter()

@@ -398,9 +398,7 @@ async fn http_credential_injection_adds_auth_header() {
 
     // Send a plain HTTP GET through the proxy (no auth header from agent).
     let mut s = TcpStream::connect(("127.0.0.1", bound.port)).await.unwrap();
-    let req = format!(
-        "GET http://127.0.0.1:{up_port}/test HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
-    );
+    let req = format!("GET http://127.0.0.1:{up_port}/test HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
     s.write_all(req.as_bytes()).await.unwrap();
 
     // The upstream echo server reflects the first line of the request.
