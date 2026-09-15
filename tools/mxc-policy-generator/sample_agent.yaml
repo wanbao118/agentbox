@@ -1,0 +1,24 @@
+# Sample agent capability declaration
+
+# Fields supported by the policy generator skeleton:
+# - allow_hosts: list of hostnames or CIDR strings (hostnames go into network.allowedHosts; CIDRs into egress.allow.to)
+# - allow_cidrs: list of CIDR strings
+# - readonly_paths: list of host paths to mount read-only
+# - readwrite_paths: list of host paths to mount read-write
+# - env: map of environment variables
+# - ports: list of ports or port ranges (single int or "start-end")
+
+allow_hosts:
+  - example.com
+  - api.example.com
+allow_cidrs:
+  - 192.0.2.0/24
+readonly_paths:
+  - /etc/ssl/certs
+readwrite_paths:
+  - /tmp/agent-work
+env:
+  EXAMPLE: "1"
+ports:
+  - 443
+  - "8000-8100"

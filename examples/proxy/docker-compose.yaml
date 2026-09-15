@@ -1,0 +1,14 @@
+version: '3.8'
+services:
+  envoy:
+    image: envoyproxy/envoy:v1.28-latest
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    command: ["envoy", "-c", "/etc/envoy/envoy.yaml", "-l", "info"]
+    ports:
+      - "15000:15000"
+  backend:
+    image: hashicorp/http-echo:0.2.3
+    command: ["-text=hello from backend"]
+    ports:
+      - "8080:8080"
